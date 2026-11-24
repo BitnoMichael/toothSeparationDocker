@@ -108,15 +108,35 @@ def augment_features(features):
 
 
 def elastic_distort(features, elastic_distortion=None):
-    """ElasticDistortion applied to the point positions (training only)."""
+    """
+    ElasticDistortion applied to the point positions (training only).
+
+    Defensive: some torch_points3d builds, when called on a bare `Data(pos=...)`
+    object (no `Batch`/`num_nodes` bookkeeping), return a `pos` tensor whose
+    shape does not match the input -- historically a 2-element array -- which
+    triggers a NumPy broadcast error of the form
+    `operands could not be broadcast together with shapes (N,3) (2,)` and
+    cascades across the entire validation pass on HF jobs. We validate the
+    returned shape and fall back to the un-distorted positions if anything
+    looks wrong, so one bad augmentation never stalls training.
+    """
     from torch_points3d.core.data_transform import ElasticDistortion
     if elastic_distortion is None:
         elastic_distortion = ElasticDistortion(apply_distorsion=True,
                                                granularity=[0.2, 0.8],
                                                magnitude=[0.4, 1.6])
-    data_obj = Data(pos=torch.from_numpy(features[:, :3]))
-    distorted = elastic_distortion(data_obj)
-    features[:, :3] = distorted.pos.numpy()
+    try:
+        src_pos = features[:, :3].copy()
+        data_obj = Data(pos=torch.from_numpy(src_pos))
+        distorted = elastic_distortion(data_obj)
+        new_pos = distorted.pos.numpy()
+        if new_pos.shape == src_pos.shape:
+            features[:, :3] = new_pos
+        else:
+            print(f"Warning: ElasticDistortion returned shape {new_pos.shape}, "
+                  f"expected {src_pos.shape}. Skipping distortion for this sample.")
+    except Exception as e:
+        print(f"Warning: ElasticDistortion failed ({e}). Skipping distortion for this sample.")
     return features
 
 

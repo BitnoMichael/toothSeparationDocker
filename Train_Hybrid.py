@@ -148,30 +148,46 @@ class DentalSegmentationTrainer:
         return 1
 
     def train(self):
-        dataset = ObjDataset(
+        # Two datasets: augment=True for training (Algorithm 1: Z-rotation,
+        # scale, color jitter, ElasticDistortion), augment=False for validation.
+        # Previously a single augmented dataset fed both samplers, which meant the
+        # very first "Quick validation" probe ran ElasticDistortion on val samples
+        # and, on broken torch_points3d builds, cascaded ~252 broadcast errors
+        # before any real training started. Splitting them fixes both correctness
+        # (val metrics should not depend on random augmentation) and stability.
+        train_augment = not self.config.get('no_augment', False)
+        train_dataset = ObjDataset(
             obj_dir=self.config['data_path'],
             json_dir=self.config['gt_path'],
             num_points=self.config['num_points'],
-            augment=True,
+            augment=train_augment,
+            binary=self.config['binary'],
+            num_classes=self.config['num_classes']
+        )
+        val_dataset = ObjDataset(
+            obj_dir=self.config['data_path'],
+            json_dir=self.config['gt_path'],
+            num_points=self.config['num_points'],
+            augment=False,
             binary=self.config['binary'],
             num_classes=self.config['num_classes']
         )
 
-        indices = list(range(len(dataset)))
+        indices = list(range(len(train_dataset)))
         np.random.shuffle(indices)
-        n_train = int((1 - self.config['val_split'] - self.config['test_split']) * len(dataset))
-        n_val = int(self.config['val_split'] * len(dataset))
+        n_train = int((1 - self.config['val_split'] - self.config['test_split']) * len(train_dataset))
+        n_val = int(self.config['val_split'] * len(train_dataset))
         train_indices, val_indices = indices[:n_train], indices[n_train:n_train + n_val]
 
         train_sampler = SubsetRandomSampler(train_indices)
         val_sampler = SubsetRandomSampler(val_indices)
 
-        train_loader = DataLoader(dataset, batch_size=self.config['batch_size'], sampler=train_sampler,
+        train_loader = DataLoader(train_dataset, batch_size=self.config['batch_size'], sampler=train_sampler,
                                   num_workers=self.config['num_workers'], pin_memory=False, drop_last=True)
-        val_loader = DataLoader(dataset, batch_size=self.config['batch_size'], sampler=val_sampler,
+        val_loader = DataLoader(val_dataset, batch_size=self.config['batch_size'], sampler=val_sampler,
                                 num_workers=self.config['num_workers'], pin_memory=False, drop_last=True)
 
-        
+
         log_file = os.path.join(self.config['save_path'], 'training_log.csv')
         if not os.path.exists(log_file):
             with open(log_file, 'w', newline='') as f:
@@ -180,8 +196,8 @@ class DentalSegmentationTrainer:
         else:
             print(f"📊 Continuing existing log file: {log_file}")
 
-        
-        start_epoch = self._initialize_components(dataset, load_checkpoint=True)
+
+        start_epoch = self._initialize_components(train_dataset, load_checkpoint=True)
 
         print("--- CONTINUING Training ---")
         print(f"Using device: {self.device}")
@@ -295,6 +311,8 @@ def get_args():
     parser.add_argument('--early_stopping_patience', type=int, default=20, help='Ранний стоп после N эпох без улучшения')
     parser.add_argument('--gpu_ids', type=str, default='0', help='Видимые GPU (CUDA_VISIBLE_DEVICES)')
     parser.add_argument('--no_amp', action='store_true', help='Отключить смешанную точность (AMP)')
+    parser.add_argument('--no_augment', action='store_true',
+                        help='Отключить аугментации (включая ElasticDistortion). Полезно при отладке.')
     parser.add_argument('--debug_model', action='store_true', help='Отладочный режим модели')
     return parser.parse_args()
 
@@ -329,6 +347,7 @@ def main():
         'nhead': args.nhead,
         'early_stopping_patience': args.early_stopping_patience,
         'debug_model': args.debug_model,
+        'no_augment': args.no_augment,
     }
 
     print("--- CONTINUING Training from Last Checkpoint (53 classes) ---")

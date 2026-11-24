@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 class ObjDataset(Dataset):
     def __init__(self, obj_dir, json_dir, num_points=8192, num_superpoints=256,
-                 augment=True, max_vertices=100000, binary=False, num_classes=35):
+                 augment=True, max_vertices=100000, binary=False, num_classes=53):
         self.obj_dir = obj_dir
         self.json_dir = json_dir
         self.num_points = num_points
@@ -89,21 +89,34 @@ class ObjDataset(Dataset):
         return labels
 
     def _remap_labels(self, labels):
-        remapped = np.zeros_like(labels)
         if self.binary:
             # Gingiva: 0, Teeth: 1
-            remapped = np.where(labels == 0, 0, 1)
-        else:
-            # Multi-class remapping for 35 classes
-            # Gingiva: 0, Upper jaw (11-27): 1-17, Lower jaw (31-47): 18-34
-            remapped = np.where(labels == 0, 0, remapped)
-            # Upper Jaw
-            for fdi in range(11, 28):
-                remapped = np.where(labels == fdi, fdi - 10, remapped)
-            # Lower Jaw
-            for fdi in range(31, 48):
-                remapped = np.where(labels == fdi, fdi - 30 + 17, remapped)
-        return remapped
+            return np.where(labels == 0, 0, 1).astype(np.int64)
+
+        # 53-class FDI mapping (0, 1-8, 9-16, 17-24, 25-32, 33-37, 38-42, 43-47, 48-52).
+        remapped = np.full_like(labels, -1)
+        remapped = np.where(labels == 0, 0, remapped)
+        for fdi in range(11, 19):
+            remapped = np.where(labels == fdi, fdi - 10, remapped)
+        for fdi in range(21, 29):
+            remapped = np.where(labels == fdi, fdi - 20 + 8, remapped)
+        for fdi in range(31, 39):
+            remapped = np.where(labels == fdi, fdi - 30 + 16, remapped)
+        for fdi in range(41, 49):
+            remapped = np.where(labels == fdi, fdi - 40 + 24, remapped)
+        for fdi in range(51, 56):
+            remapped = np.where(labels == fdi, fdi - 50 + 32, remapped)
+        for fdi in range(61, 66):
+            remapped = np.where(labels == fdi, fdi - 60 + 37, remapped)
+        for fdi in range(71, 76):
+            remapped = np.where(labels == fdi, fdi - 70 + 42, remapped)
+        for fdi in range(81, 86):
+            remapped = np.where(labels == fdi, fdi - 80 + 47, remapped)
+        unmapped = remapped < 0
+        if unmapped.any():
+            print(f"Warning: {unmapped.sum()} labels could not be remapped. "
+                  f"Unique: {np.unique(labels[unmapped])}")
+        return np.clip(remapped, 0, self.num_classes - 1)
 
     def _augment_pointcloud(self, vertices):
         vertices = vertices.copy()
@@ -146,7 +159,7 @@ class ObjDataset(Dataset):
     def __len__(self):
         return len(self.obj_files)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, _depth=0):
         obj_path = self.obj_files[idx]
         json_path = self.json_files[idx]
 
@@ -178,9 +191,15 @@ class ObjDataset(Dataset):
                 'superpoint_centers': torch.tensor(superpoint_centers, dtype=torch.float32),
             }
         except Exception as e:
+            # Bounded fallback: surface the error loudly, then skip to the next
+            # index at most `len(self)` times so a single bad file cannot cause
+            # infinite recursion. Previously this recursed unconditionally and
+            # could cascade through the whole dataset before failing loudly.
             print(f"Error processing sample {idx} ({os.path.basename(obj_path)}): {str(e)}")
-            # Return a dummy sample on error
-            return self.__getitem__((idx + 1) % len(self))
+            if _depth >= len(self):
+                raise RuntimeError(f"Dataset exhausted: could not load any sample "
+                                   f"starting from idx={idx}") from e
+            return self.__getitem__((idx + 1) % len(self), _depth=_depth + 1)
 
     def get_label_weights(self):
         return self.label_weights

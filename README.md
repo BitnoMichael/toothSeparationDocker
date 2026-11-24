@@ -210,8 +210,16 @@ docker run --gpus all --rm --shm-size=16g \
 | `--early_stopping_patience` | — | `20` |
 | `--gpu_ids` | — | `0` |
 | `--no_amp` | — | (флаг) отключить смешанную точность |
+| `--no_augment` | — | (флаг) отключить аугментации (включая ElasticDistortion) |
+| `--debug_model` | — | (флаг) отладочный режим модели |
 
 Смешанная точность (AMP) включена по умолчанию при наличии CUDA; состояние `GradScaler` сохраняется и загружается в чекпоинтах.
+
+### Аугментации и ElasticDistortion
+
+Аугментации (`_augment_features` + `ElasticDistortion`) применяются **только к train-датасету**; для val-датасета `augment=False` (см. `Train_Hybrid.py`, два отдельных `ObjDataset`). Раньше единый датасет с `augment=True` кормил оба сэмплера, и первый же val-прогон на сломанном `torch_points3d` каскадно падал ~252 раза.
+
+`ElasticDistortion` теперь обёрнут защитно во всех даталоадерах (`DataLoader_HybridTransformer`, `DataLoader_DentalMAN`, `PreprocessingPaper.elastic_distort` — покрывает PNet/PP/kpconv/Cust_DGCNN): возвращаемая форма валидируется, при несовпадении искажение пропускается, а не падает. Сам shim `torch_points3d/core/data_transform.py` тоже исправлен: ранее `granularity=(0.2, 0.8)` давал `grid_shape` длины 2, и `(N,3) * (2,)` выбрасывало ровно ту ошибку из лога HF jobs. Для отладки можно полностью отключить аугментации флагом `--no_augment`.
 
 ### Пути в других `Train_*.py` / `Test_*.py`
 

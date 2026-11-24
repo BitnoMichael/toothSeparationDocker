@@ -161,7 +161,7 @@ class TeethGNNDataset:
     def __len__(self):
         return len(self.obj_files)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, _depth=0):
         obj_path = self.obj_files[idx]
         json_path = self.json_files[idx]
         print(f"Processing sample {idx}: {obj_path}")
@@ -207,5 +207,12 @@ class TeethGNNDataset:
             return data
 
         except Exception as e:
+            # Bounded fallback: surface the error loudly, then skip to the next
+            # index at most `len(self)` times so a single bad file cannot cause
+            # infinite recursion (TeethGNN preprocessing is heavy -- one failure
+            # used to cascade silently through the entire dataset).
             print(f"Error processing {obj_path}: {e}")
-            return self.__getitem__((idx + 1) % len(self))
+            if _depth >= len(self):
+                raise RuntimeError(f"Dataset exhausted: could not load any sample "
+                                   f"starting from idx={idx}") from e
+            return self.__getitem__((idx + 1) % len(self), _depth=_depth + 1)

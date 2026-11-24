@@ -211,10 +211,34 @@ class ObjDataset_Arch(Dataset):
             pos = pos / max_dist
         return pos
 
+    def _safe_elastic_distort(self, features):
+        """
+        Defensive ElasticDistortion. Some torch_points3d builds return a `pos`
+        tensor whose shape does not match the input when called on a bare
+        `Data(pos=...)`, which historically raised
+        `operands could not be broadcast together with shapes (N,3) (2,)` and
+        cascaded across the whole validation pass. Fall back gracefully.
+        """
+        if not self.augment:
+            return features
+        try:
+            src_pos = features[:, :3].copy()
+            data_obj = Data(pos=torch.from_numpy(src_pos))
+            distorted_data_obj = self.elastic_distortion(data_obj)
+            distorted = distorted_data_obj.pos.numpy()
+            if distorted.shape == src_pos.shape:
+                features[:, :3] = distorted
+            else:
+                print(f"Warning: ElasticDistortion returned shape {distorted.shape}, "
+                      f"expected {src_pos.shape}. Skipping distortion for this sample.")
+        except Exception as e:
+            print(f"Warning: ElasticDistortion failed ({e}). Skipping distortion for this sample.")
+        return features
+
     def __len__(self):
         return len(self.obj_files)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx, _depth=0):
         obj_path = self.obj_files[idx]
         json_path = self.json_files[idx]
 
@@ -231,9 +255,7 @@ class ObjDataset_Arch(Dataset):
 
             if self.augment:
                 features = self._augment_features(features)
-                data_obj = Data(pos=torch.from_numpy(features[:, :3]))
-                distorted_data_obj = self.elastic_distortion(data_obj)
-                features[:, :3] = distorted_data_obj.pos.numpy()
+                features = self._safe_elastic_distort(features)
 
             features[:, :3] = self._normalize_pos(features[:, :3])
             arc_params = self._compute_arch_params(features)
@@ -253,8 +275,15 @@ class ObjDataset_Arch(Dataset):
                 'arc_params': torch.from_numpy(arc_params).float()
             }
         except Exception as e:
+            # Bounded fallback: surface the real failure instead of silently
+            # recursing into the next index, which historically masked the
+            # ElasticDistortion bug above. Bound the depth to `len(self)` so a
+            # broken loader fails loudly instead of looping forever.
             print(f"Error processing sample {idx} ({os.path.basename(obj_path)}): {str(e)}")
-            return self.__getitem__((idx + 1) % len(self))
+            if _depth >= len(self):
+                raise RuntimeError(f"Dataset exhausted: could not load any sample "
+                                   f"starting from idx={idx}") from e
+            return self.__getitem__((idx + 1) % len(self), _depth=_depth + 1)
 
     def get_label_weights(self):
         return self.label_weights
