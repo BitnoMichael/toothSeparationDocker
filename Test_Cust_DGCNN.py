@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from dataloader.DataLoader_Cust_DGCNN import ObjDataset
 from networks.Cust_DGCNN_Dilated import DGCNN_Dilated
 
-DATASET_ROOT = 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_900'
+DATASET_ROOT = os.environ.get('DATASET_ROOT', './Dataset_900')
 
 config = {
     'data_path': f'{DATASET_ROOT}/test/data',

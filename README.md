@@ -27,12 +27,14 @@ The model processes 65,536-point 6-D point clouds (XYZ + RGB) and is trained wit
 ## Requirements
 
 - Python >= 3.8
-- PyTorch >= 1.13
-- torch-geometric
-- torch-points3d (for `ElasticDistortion`)
+- PyTorch >= 1.13 (образ зафиксирован на PyTorch 2.3.1 + CUDA 12.1)
+- torch-geometric + `torch-scatter`/`torch-sparse`/`torch-cluster`/`torch-spline-conv`
+- `torch_points3d` — в репозиторий встроен **локальный shim** `torch_points3d/`, реализующий только нужный проекту класс `ElasticDistortion`. Полный пакет `torch-points3d` ставить **не нужно** (он не указан в `requirements.txt`).
 - open3d, trimesh, scikit-learn (graph preprocessing)
 - numpy, tqdm, pandas, einops
 - optuna (hyperparameter optimization)
+
+Полный список — в `requirements.txt`.
 
 ## Dataset
 
@@ -127,6 +129,111 @@ python Test_TeethGnn.py
 ```
 
 `Test_TeethGnn.py` automatically builds the test graph cache on first run.
+
+## Docker
+
+В репозитории есть `Dockerfile`, `requirements.txt`, `.dockerignore` и GitHub Actions workflow `.github/workflows/docker-build.yml` (сборка и пуш в `ghcr.io/<owner>/<repo>:latest` + `:sha-<commit>` при пуше в `main`).
+
+### Сборка
+
+```bash
+docker build -t hybrid-teeth:latest .
+```
+
+Базовый образ — `pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime` (PyTorch 2.3.1 + CUDA 12.1). PyG-стек (`torch-scatter`/`torch-sparse`/`torch-cluster`/`torch-spline-conv`/`torch-geometric`) ставится отдельным `RUN` с правильным индексом колёс `torch-2.3.1+cu121`. Ожидаемый размер образа — 10–12 GB.
+
+### Точки монтирования
+
+`Dockerfile` объявляет три `VOLUME`:
+
+| Путь в контейнере | Назначение |
+|---|---|
+| `/app/Dataset_900` | Датасет (монтируется read-only; в образ не входит — исключён в `.dockerignore`) |
+| `/app/checkpoints` | Чекпоинты и `training_log.csv` (иначе пропадут после остановки контейнера) |
+| `/app/experiments` | Артефакты Optuna-экспериментов |
+
+Датасет монтируется отдельно — например, через Hugging Face datasets, скачанный и распакованный на хост, либо напрямую volume.
+
+### Точка входа (ENTRYPOINT)
+
+```dockerfile
+ENTRYPOINT ["python"]
+CMD ["Train_Hybrid.py"]
+```
+
+Поэтому можно запускать **любой** скрипт репозитория, передав его как аргумент `docker run`:
+
+```bash
+# Обучение по умолчанию (Train_Hybrid.py):
+docker run --gpus all --rm --shm-size=16g \
+  -v /host/Dataset_900:/app/Dataset_900:ro \
+  -v /host/checkpoints:/app/checkpoints \
+  hybrid-teeth:latest
+
+# Запуск другого скрипта — просто передаём его имя:
+docker run --gpus all --rm --shm-size=16g \
+  -v /host/Dataset_900:/app/Dataset_900:ro \
+  -v /host/checkpoints:/app/checkpoints \
+  hybrid-teeth:latest Test_Hybrid.py
+
+# Обучение с переопределёнными параметрами:
+docker run --gpus all --rm --shm-size=16g \
+  -v /host/Dataset_900:/app/Dataset_900:ro \
+  -v /host/checkpoints:/app/checkpoints \
+  hybrid-teeth:latest Train_Hybrid.py --epochs 50 --save_path /app/checkpoints/exp1
+```
+
+- `--gpus all` — проброс GPU (требуется `nvidia-container-toolkit`).
+- `--shm-size=16g` — PyTorch DataLoader с `num_workers>0` использует `/dev/shm`; дефолта 64 MB не хватит.
+
+### CLI-аргументы `Train_Hybrid.py`
+
+`Train_Hybrid.py` теперь принимает CLI-аргументы (все пути также читаются из env-переменных, если аргумент не передан):
+
+| Аргумент | Env-переменная | По умолчанию |
+|---|---|---|
+| `--data_path` | `DATA_PATH` | `./Dataset_900/train/data` |
+| `--gt_path` | `GT_PATH` | `./Dataset_900/train/ground-truth` |
+| `--save_path` | `SAVE_PATH` | `./checkpoints/HybridTransformer_Final_6D_600_try5_53/` |
+| `--epochs` | — | `250` |
+| `--batch_size` | — | `1` |
+| `--num_workers` | — | `2` |
+| `--num_points` | — | `65536` |
+| `--lr` | — | `1e-4` |
+| `--weight_decay` | — | `1e-4` |
+| `--accumulation_steps` | — | `1` |
+| `--focal_gamma` | — | `2.8214` |
+| `--d_model` | — | `256` |
+| `--nhead` | — | `4` |
+| `--val_split` | — | `0.2` |
+| `--test_split` | — | `0.1` |
+| `--early_stopping_patience` | — | `20` |
+| `--gpu_ids` | — | `0` |
+| `--no_amp` | — | (флаг) отключить смешанную точность |
+
+Смешанная точность (AMP) включена по умолчанию при наличии CUDA; состояние `GradScaler` сохраняется и загружается в чекпоинтах.
+
+### Пути в других `Train_*.py` / `Test_*.py`
+
+Все 16 обучающих/тестовых скриптов теперь используют относительные пути по умолчанию (раньше 14 из них содержали Windows-пути `K:/...`). Пути к данным можно переопределить:
+
+- Скрипты с `argparse` (`Train_Cust_DGCNN.py`, `Train_PointNet.py`, `Train_PointNetPP.py`, `Train_kpconv.py`, `Train_TeethGnn.py`, `Train_Hybrid.py`) — через `--data_path` / `--gt_path` или env-переменные `DATA_PATH` / `GT_PATH`.
+- Скрипты без `argparse` (`Train_DentalMAN.py`, `Train_SPT.py`, `Train_Transformer.py`, `Test_DentalMAN.py`, `Test_HybridByIndividual.py`, `Test_HybridByIndividualSaveDirect.py`) — через env-переменные `DATA_PATH` / `GT_PATH`.
+- Тестовые скрипты с `DATASET_ROOT` (`Test_Cust_DGCNN.py`, `Test_PointNet.py`, `Test_PointNetPP.py`, `Test_TeethGnn.py`, `Test_kpconv.py`) — через env-переменную `DATASET_ROOT` (по умолчанию `./Dataset_900`).
+
+Пример запуска теста с переопределённым корнем датасета:
+
+```bash
+docker run --gpus all --rm --shm-size=16g \
+  -e DATASET_ROOT=/app/Dataset_900 \
+  -v /host/Dataset_900:/app/Dataset_900:ro \
+  -v /host/checkpoints:/app/checkpoints \
+  hybrid-teeth:latest Test_kpconv.py
+```
+
+### Версии по умолчанию `num_classes`
+
+Во всех сетях (`HybridTransformer.py`, `SuperpointTransformer.py`, `TeethGnn_Model.py`, `TransformerNet.py`, `Cust_DGCNN_Dilated.py`, `DentalMAN.py`) значение `num_classes` по умолчанию приведено к **53** (раньше в четырёх сетях стояло `35`), чтобы инстанцирование без аргументов сразу давало корректную FDI-53 модель.
 
 ## Citation
 

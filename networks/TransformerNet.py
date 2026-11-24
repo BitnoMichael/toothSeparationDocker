@@ -66,7 +66,7 @@ class PointTransformerBlock(nn.Module):
 
 
 class EfficientPointTransformer(nn.Module):
-    def __init__(self, num_classes=35, dim=128, depth=4, heads=4, dim_head=32, dropout=0.1):
+    def __init__(self, num_classes=53, dim=128, depth=4, heads=4, dim_head=32, dropout=0.1):
         super().__init__()
 
         # Hierarchical feature extraction

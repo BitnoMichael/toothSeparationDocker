@@ -28,7 +28,7 @@ class StaticEdgeConv(nn.Module):
 
 
 class TeethGNN(nn.Module):
-    def __init__(self, num_classes=35, k=16):
+    def __init__(self, num_classes=53, k=16):
         super().__init__()
         self.k = k
 

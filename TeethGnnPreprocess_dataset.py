@@ -8,8 +8,8 @@ from dataloader.Dataloader_TeethGnn import TeethGNNDataset
 
 # Configuration
 config = {
-    'data_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_600/train_data/data',
-    'gt_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_600/train_data/ground-truth',
+    'data_path': os.environ.get('DATA_PATH', './Dataset_600/train_data/data'),
+    'gt_path': os.environ.get('GT_PATH', './Dataset_600/train_data/ground-truth'),
     'num_facets': 10000,
     'num_classes': 53,
     'output_dir': './TeethGnn_processed_data_53'
@@ -40,10 +40,18 @@ def _process_one(idx):
 
 def main():
     parser = argparse.ArgumentParser(description='TeethGNN graph preprocessing (parallel, 53-class)')
+    parser.add_argument('--data_path', type=str,
+                        default=os.environ.get('DATA_PATH', config['data_path']),
+                        help='Директория с .obj файлами')
+    parser.add_argument('--gt_path', type=str,
+                        default=os.environ.get('GT_PATH', config['gt_path']),
+                        help='Директория с .json файлами разметки')
     parser.add_argument('--workers', type=int, default=4, help='Number of parallel workers')
     parser.add_argument('--max', type=int, default=0, help='0 = process all samples; >0 caps the count')
     parser.add_argument('--output_dir', type=str, default=config['output_dir'])
     args = parser.parse_args()
+    config['data_path'] = args.data_path
+    config['gt_path'] = args.gt_path
     config['output_dir'] = args.output_dir
     config['num_classes'] = 53
 

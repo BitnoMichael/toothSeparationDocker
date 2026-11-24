@@ -174,8 +174,8 @@ def main():
     # It uses the best parameters discovered by the Optuna hyperparameter search.
     config = {
         # --- File Paths and Device Config ---
-        'data_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_100/train_data/data',
-        'gt_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_100/train_data/ground-truth',
+        'data_path': os.environ.get('DATA_PATH', './Dataset_100/train_data/data'),
+        'gt_path': os.environ.get('GT_PATH', './Dataset_100/train_data/ground-truth'),
         'save_path': './checkpoints/SuperPointTransformerNet/V3',
         'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         'use_amp': torch.cuda.is_available(),

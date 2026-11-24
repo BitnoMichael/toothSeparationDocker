@@ -7,7 +7,7 @@ from torch.utils.data import DataLoader
 from dataloader.DataLoader_PP import ObjDataset
 from networks.PointNetPlusPlus import PointNetPlusPlus
 
-DATASET_ROOT = 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_900'
+DATASET_ROOT = os.environ.get('DATASET_ROOT', './Dataset_900')
 
 config = {
     'data_path': f'{DATASET_ROOT}/test/data',

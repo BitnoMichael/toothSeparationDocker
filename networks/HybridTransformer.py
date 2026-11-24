@@ -24,7 +24,7 @@ class TransformerBlock(nn.Module):
         return x
 
 class HybridPointTransformer(nn.Module):
-    def __init__(self, num_classes=35, d_model=256, nhead=4, debug=False):
+    def __init__(self, num_classes=53, d_model=256, nhead=4, debug=False):
         super().__init__()
         self.debug = debug
 

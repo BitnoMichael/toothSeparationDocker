@@ -27,7 +27,7 @@ class TransformerBlock(nn.Module):
 
 
 class SuperpointTransformer(nn.Module):
-    def __init__(self, num_classes=35, num_superpoints=256, nhead=8, d_model=256):
+    def __init__(self, num_classes=53, num_superpoints=256, nhead=8, d_model=256):
         super().__init__()
         self.num_superpoints = num_superpoints
         self.d_model = d_model

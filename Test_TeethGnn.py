@@ -9,7 +9,7 @@ from dataloader.Dataloader_TeethGnn import TeethGNNDataset
 from dataloader.Dataloader_TeethGnn_Cached import TeethGNNDatasetCached
 from networks.TeethGnn_Model import TeethGNN
 
-DATASET_ROOT = 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_900'
+DATASET_ROOT = os.environ.get('DATASET_ROOT', './Dataset_900')
 
 config = {
     'data_path': f'{DATASET_ROOT}/test/data',

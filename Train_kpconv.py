@@ -21,8 +21,8 @@ from networks.kpconv import KPConvNet
 # Table 2 (Dental_Springer_BMC_Adjusted_v3): KPConv -> Cross-Entropy, AdamW,
 #                                                          lr 2.8e-5, wd 7.49e-4, batch 1
 config = {
-    'data_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_600/train_data/data',
-    'gt_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_600/train_data/ground-truth',
+    'data_path': os.environ.get('DATA_PATH', './Dataset_600/train_data/data'),
+    'gt_path': os.environ.get('GT_PATH', './Dataset_600/train_data/ground-truth'),
     'save_path': './checkpoints/KPConv_6D_600_final/',
     'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     'use_amp': torch.cuda.is_available(),
@@ -46,6 +46,12 @@ MIN_EPOCHS = 150
 
 def get_args():
     parser = argparse.ArgumentParser(description='Training KPConv (Optuna) for Dental Segmentation')
+    parser.add_argument('--data_path', type=str,
+                        default=os.environ.get('DATA_PATH', './Dataset_600/train_data/data'),
+                        help='Директория с .obj файлами обучающей выборки')
+    parser.add_argument('--gt_path', type=str,
+                        default=os.environ.get('GT_PATH', './Dataset_600/train_data/ground-truth'),
+                        help='Директория с .json файлами разметки (ground truth)')
     parser.add_argument('--save_path', default='./experiments/', type=str, help='Path to save experiments')
     parser.add_argument('--experiment_name', default='KPConv_Optuna', type=str, help='Experiment name')
     parser.add_argument('--gpu_ids', default='0', type=str, help='GPU IDs')
@@ -244,6 +250,10 @@ def main():
     args = get_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_ids
     os.makedirs(args.save_path, exist_ok=True)
+
+    # Переопределяем пути из CLI/env, чтобы можно было запускать в контейнере.
+    config['data_path'] = args.data_path
+    config['gt_path'] = args.gt_path
 
     device = config['device']
     print(f"Using device: {device}")

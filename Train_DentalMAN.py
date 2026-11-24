@@ -156,8 +156,8 @@ class DentalMAN_Trainer:
 
 def main():
     config = {
-        'data_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_100/train_data/data',
-        'gt_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_100/train_data/ground-truth',
+        'data_path': os.environ.get('DATA_PATH', './Dataset_100/train_data/data'),
+        'gt_path': os.environ.get('GT_PATH', './Dataset_100/train_data/ground-truth'),
         'save_path': './checkpoints/DentalMAN/',
         'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         'use_amp': torch.cuda.is_available(),

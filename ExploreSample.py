@@ -1,12 +1,15 @@
 import json
+import os
 import numpy as np
 import torch
 
 
 
 
-# Load the .json file
-json_file_path = 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset/train_data/ground-truth/013NUWYR/013NUWYR_lower.json'
+# Load the .json file (path overridable via SAMPLE_JSON env var for Docker)
+json_file_path = os.environ.get(
+    'SAMPLE_JSON',
+    './Dataset_900/train/ground-truth/013NUWYR/013NUWYR_lower.json')
 with open(json_file_path, 'r') as f:
     ground_truth = json.load(f)
 

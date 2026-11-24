@@ -26,5 +26,14 @@ RUN pip install torch-scatter torch-sparse torch-cluster torch-spline-conv \
 # 3) Код проекта (включая шим torch_points3d/ и все сети/даталоадеры)
 COPY . /app
 
-# Точка входа по умолчанию (переопределим в hf jobs run)
-CMD ["python", "Train_Hybrid.py"]
+# Точки монтирования для датасета (read-only) и артефактов обучения (челноки/логи).
+# Датасет монтируется отдельно (например через Hugging Face datasets) в /app/Dataset_900.
+# Чекпоинты/логи — в /app/checkpoints, иначе пропадут после остановки контейнера.
+VOLUME ["/app/Dataset_900", "/app/checkpoints", "/app/experiments"]
+
+# ENTRYPOINT = python, чтобы можно было запускать любой скрипт репозитория:
+#     docker run <image>                         -> python Train_Hybrid.py
+#     docker run <image> Test_Hybrid.py           -> python Test_Hybrid.py
+#     docker run <image> Train_Hybrid.py --epochs 50 --save_path /app/checkpoints/exp1
+ENTRYPOINT ["python"]
+CMD ["Train_Hybrid.py"]

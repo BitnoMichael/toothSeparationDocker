@@ -1,11 +1,13 @@
 import os
 import csv
+import argparse
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import SubsetRandomSampler
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 import torch.nn.functional as F
 
@@ -41,6 +43,9 @@ class DentalSegmentationTrainer:
         self.criterion = None
         self.early_stop_counter = 0
         self.patience = config.get('early_stopping_patience', 20)
+        # AMP scaler для смешанной точности (включается только при наличии CUDA).
+        self.use_amp = config.get('use_amp', torch.cuda.is_available())
+        self.scaler = GradScaler(enabled=self.use_amp)
 
     def compute_metrics(self, pred, target):
         pred_classes = pred.argmax(dim=-1).view(-1)
@@ -69,18 +74,21 @@ class DentalSegmentationTrainer:
             x = batch['x'].to(self.device)
             y = batch['y'].to(self.device)
 
-            with torch.set_grad_enabled(is_train):
+            with torch.set_grad_enabled(is_train), autocast(enabled=self.use_amp):
                 outputs = model(pos, x)
                 loss = criterion(outputs.reshape(-1, self.config['num_classes']), y.reshape(-1))
 
             if is_train:
-                loss = loss / accumulation_steps
-                loss.backward()
+                # Масштабируем loss под накопление градиентов и AMP.
+                loss_scaled = loss / accumulation_steps
+                self.scaler.scale(loss_scaled).backward()
 
                 if (i + 1) % accumulation_steps == 0 or (i + 1) == len(loader):
-                    optimizer.step()
+                    self.scaler.step(optimizer)
+                    self.scaler.update()
                     optimizer.zero_grad()
 
+            # На CPU/без AMP scaler не влияет на значения; item() возвращает unscaled loss.
             acc, iou = self.compute_metrics(outputs, y)
             total_loss += loss.item() * accumulation_steps
             total_acc += acc
@@ -106,6 +114,10 @@ class DentalSegmentationTrainer:
         if 'optimizer_state_dict' in checkpoint and self.optimizer is not None:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             print("✅ Optimizer state loaded")
+
+        if 'scaler_state_dict' in checkpoint and self.scaler is not None:
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            print("✅ AMP scaler state loaded")
 
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch'] + 1
@@ -178,7 +190,7 @@ class DentalSegmentationTrainer:
 
         
         print("\n🔍 Quick validation to verify model state...")
-        with torch.no_grad():
+        with torch.no_grad(), autocast(enabled=self.use_amp):
             sample_batch = next(iter(val_loader))
             pos = sample_batch['pos'].to(self.device)
             x = sample_batch['x'].to(self.device)
@@ -232,16 +244,18 @@ class DentalSegmentationTrainer:
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scaler_state_dict': self.scaler.state_dict(),
                     'best_miou': self.best_miou,
                 }, os.path.join(self.config['save_path'], 'checkpoint_best.pth'))
 
-            
+
             if (epoch + 1) % 5 == 0:
                 backup_path = os.path.join(self.config['save_path'], f'backup_epoch_{epoch + 1}.pth')
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scaler_state_dict': self.scaler.state_dict(),
                     'best_miou': self.best_miou,
                 }, backup_path)
                 print(f"💾 Backup saved: {backup_path}")
@@ -250,37 +264,80 @@ class DentalSegmentationTrainer:
         print(f"Final best validation mIoU: {self.best_miou:.4f}")
         print(f"Training completed from epoch {start_epoch} to {self.config['epochs']}")
 
+def get_args():
+    """CLI-аргументы. Все пути по умолчанию рассчитаны на монтирование датасета в /app/Dataset_900."""
+    parser = argparse.ArgumentParser(
+        description='Training HybridPointTransformer for Dental Segmentation (53 FDI classes)')
+    # Пути к данным — датасет монтируется отдельно (например, через Hugging Face datasets).
+    parser.add_argument('--data_path', type=str,
+                        default=os.environ.get('DATA_PATH', './Dataset_900/train/data'),
+                        help='Директория с .obj файлами обучающей выборки')
+    parser.add_argument('--gt_path', type=str,
+                        default=os.environ.get('GT_PATH', './Dataset_900/train/ground-truth'),
+                        help='Директория с .json файлами разметки (ground truth)')
+    parser.add_argument('--save_path', type=str,
+                        default=os.environ.get('SAVE_PATH',
+                                               './checkpoints/HybridTransformer_Final_6D_600_try5_53/'),
+                        help='Куда сохранять чекпоинты и training_log.csv')
+    # Гиперпараметры обучения
+    parser.add_argument('--epochs', type=int, default=250, help='Кол-во эпох')
+    parser.add_argument('--batch_size', type=int, default=1, help='Размер батча (Table 2: 1)')
+    parser.add_argument('--num_workers', type=int, default=2, help='worker-ов у DataLoader')
+    parser.add_argument('--num_points', type=int, default=65536, help='Точек на образец после сэмплинга')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate (AdamW)')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay (AdamW)')
+    parser.add_argument('--accumulation_steps', type=int, default=1, help='Шагов накопления градиента')
+    parser.add_argument('--focal_gamma', type=float, default=2.8214, help='Гамма FocalLoss')
+    parser.add_argument('--d_model', type=int, default=256, help='Размерность модели трансформера')
+    parser.add_argument('--nhead', type=int, default=4, help='Кол-во голов внимания')
+    parser.add_argument('--val_split', type=float, default=0.2, help='Доля валидации')
+    parser.add_argument('--test_split', type=float, default=0.1, help='Доля теста (не используется при обучении, только для разметки индексов)')
+    parser.add_argument('--early_stopping_patience', type=int, default=20, help='Ранний стоп после N эпох без улучшения')
+    parser.add_argument('--gpu_ids', type=str, default='0', help='Видимые GPU (CUDA_VISIBLE_DEVICES)')
+    parser.add_argument('--no_amp', action='store_true', help='Отключить смешанную точность (AMP)')
+    parser.add_argument('--debug_model', action='store_true', help='Отладочный режим модели')
+    return parser.parse_args()
+
+
 def main():
-    
-    
+    args = get_args()
+
+    # Ограничение видимых GPU.
+    if args.gpu_ids:
+        os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_ids
+
     config = {
-        'data_path': './Dataset_900/train/data',
-        'gt_path': './Dataset_900/train/ground-truth',
-        'save_path': './checkpoints/HybridTransformer_Final_6D_600_try5_53/',
+        'data_path': args.data_path,
+        'gt_path': args.gt_path,
+        'save_path': args.save_path,
         'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
-        'use_amp': torch.cuda.is_available(),
+        'use_amp': torch.cuda.is_available() and not args.no_amp,
         'num_classes': 53,
         'binary': False,
-        'val_split': 0.2,
-        'test_split': 0.1,  
-        'epochs': 250,  
-        'accumulation_steps': 1,  
+        'val_split': args.val_split,
+        'test_split': args.test_split,
+        'epochs': args.epochs,
+        'accumulation_steps': args.accumulation_steps,
 
-        'num_workers': 2,
-        'num_points': 65536,
-        'lr': 1e-4,
-        'batch_size': 1,
-        'weight_decay': 1e-4,
-        'focal_gamma': 2.8214,
-        'd_model': 256,
-        'nhead': 4,
-        'early_stopping_patience': 20,
-        'debug_model': False,
+        'num_workers': args.num_workers,
+        'num_points': args.num_points,
+        'lr': args.lr,
+        'batch_size': args.batch_size,
+        'weight_decay': args.weight_decay,
+        'focal_gamma': args.focal_gamma,
+        'd_model': args.d_model,
+        'nhead': args.nhead,
+        'early_stopping_patience': args.early_stopping_patience,
+        'debug_model': args.debug_model,
     }
 
     print("--- CONTINUING Training from Last Checkpoint (53 classes) ---")
     print(f"Using device: {config['device']}")
     print(f"Number of classes: {config['num_classes']}")
+    print(f"Data path:   {config['data_path']}")
+    print(f"GT path:     {config['gt_path']}")
+    print(f"Save path:   {config['save_path']}")
+    print(f"AMP enabled: {config['use_amp']}")
 
     trainer = DentalSegmentationTrainer(config)
     trainer.train()

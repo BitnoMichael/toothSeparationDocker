@@ -3,10 +3,10 @@ import shutil
 import numpy as np
 from pathlib import Path
 
-SRC_DATA_DIR = Path(r"K:\FromDevexy2024-5-py\PyRepos\segmentation\DeepLock\Dataset_900\train_data\data")
-SRC_GT_DIR = Path(r"K:\FromDevexy2024-5-py\PyRepos\segmentation\DeepLock\Dataset_900\train_data\ground-truth")
+SRC_DATA_DIR = Path(os.environ.get('SRC_DATA_DIR', './Dataset_900/train_data/data'))
+SRC_GT_DIR = Path(os.environ.get('SRC_GT_DIR', './Dataset_900/train_data/ground-truth'))
 
-DST_ROOT = Path(r"K:\FromDevexy2024-5-py\PyRepos\segmentation\DeepLock\Dataset_900")
+DST_ROOT = Path(os.environ.get('DST_ROOT', './Dataset_900'))
 
 TRAIN_RATIO = 0.7
 VAL_RATIO = 0.2

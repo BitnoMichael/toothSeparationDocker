@@ -4,16 +4,16 @@ import pandas as pd
 from pathlib import Path
 
 # ----------------------------
-# Configuration
+# Configuration (paths overridable via env vars; sane Linux defaults for Docker)
 # ----------------------------
-EXCEL_PATH = r"C:\Users\mohamed\Downloads\etst.xlsx"
+EXCEL_PATH = os.environ.get('EXCEL_PATH', './Dataset_600/etst.xlsx')
 SHEET_NAME = "Sheet1"
 
-SRC_DATA_DIR = Path(r"C:\Users\mohamed\Downloads\train_data\data")
-SRC_GT_DIR = Path(r"C:\Users\mohamed\Downloads\train_data\ground-truth")
+SRC_DATA_DIR = Path(os.environ.get('SRC_DATA_DIR', './Dataset_600/train_data/data'))
+SRC_GT_DIR = Path(os.environ.get('SRC_GT_DIR', './Dataset_600/train_data/ground-truth'))
 
-DST_DATA_DIR = Path(r"K:\FromDevexy2024-5-py\PyRepos\segmentation\DeepLock\Dataset_600\test_data\data")
-DST_GT_DIR = Path(r"K:\FromDevexy2024-5-py\PyRepos\segmentation\DeepLock\Dataset_600\test_data\ground-truth")
+DST_DATA_DIR = Path(os.environ.get('DST_DATA_DIR', './Dataset_600/test_data/data'))
+DST_GT_DIR = Path(os.environ.get('DST_GT_DIR', './Dataset_600/test_data/ground-truth'))
 
 # Ensure destination directories exist
 DST_DATA_DIR.mkdir(parents=True, exist_ok=True)

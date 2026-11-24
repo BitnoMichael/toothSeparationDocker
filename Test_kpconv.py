@@ -8,7 +8,7 @@ from torch_geometric.data import Data
 from dataloader.DataLoader_kpconv import ObjDataset
 from networks.kpconv import KPConvNet
 
-DATASET_ROOT = 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_900'
+DATASET_ROOT = os.environ.get('DATASET_ROOT', './Dataset_900')
 
 config = {
     'data_path': f'{DATASET_ROOT}/test/data',

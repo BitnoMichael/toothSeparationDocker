@@ -144,8 +144,8 @@ class DentalSegmentationTrainer:
 
 def main():
     config = {
-        'data_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_600/train_data/data',
-        'gt_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_600/train_data/ground-truth',
+        'data_path': os.environ.get('DATA_PATH', './Dataset_600/train_data/data'),
+        'gt_path': os.environ.get('GT_PATH', './Dataset_600/train_data/ground-truth'),
         'save_path': './checkpoints/HybridTransformer_Final_6D/',
         'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         'use_amp': torch.cuda.is_available(),

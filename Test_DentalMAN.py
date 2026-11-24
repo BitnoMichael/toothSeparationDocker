@@ -185,8 +185,8 @@ class AccuracyOnlyTester:
 
 def main():
     config = {
-        'data_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_600/train_data/data',
-        'gt_path': 'K:/FromDevexy2024-5-py/PyRepos/segmentation/DeepLock/Dataset_600/train_data/ground-truth',
+        'data_path': os.environ.get('DATA_PATH', './Dataset_600/train_data/data'),
+        'gt_path': os.environ.get('GT_PATH', './Dataset_600/train_data/ground-truth'),
         'checkpoint_path': './checkpoints/DentalMAN/dentalman_best_model.pth',
         'device': torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
         'num_classes': 53,
