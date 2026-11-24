@@ -1,0 +1,17 @@
+numpy
+scipy
+scikit-learn
+pandas
+tqdm
+einops
+optuna
+open3d
+trimesh
+vedo
+rarfile
+tensorboardX
+nvidia-ml-py
+plyfile
+pymeshlab
+matplotlib
+seaborn
