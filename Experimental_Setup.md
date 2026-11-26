@@ -54,7 +54,8 @@ Install the following:
 - Python >= 3.8
 - PyTorch >= 1.13
 - torch-geometric
-- torch-points3d
+- (torch-points3d не требуется: `ElasticDistortion` реализован в `utils/elastic_distortion.py`;
+  при желании можно включить установленный upstream через `TP3D_USE_UPSTREAM=1`)
 - open3d, trimesh, scikit-learn, numpy, tqdm, pandas, einops, optuna, rarfile, vedo
 
 ---

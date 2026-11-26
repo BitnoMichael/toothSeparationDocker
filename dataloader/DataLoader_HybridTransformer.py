@@ -7,8 +7,9 @@ import torch
 from torch.utils.data import Dataset
 import random
 from tqdm import tqdm
-# You may need to install this library: pip install torch-points3d --no-deps  # then manually install dependencies
-from torch_points3d.core.data_transform import ElasticDistortion
+# ElasticDistortion: локальная реализация upstream-семантики (numpy, без scipy).
+# Настоящий пакет torch-points3d можно подключить через TP3D_USE_UPSTREAM=1.
+from utils.elastic_distortion import ElasticDistortion
 from torch_geometric.data import Data
 
 
@@ -164,7 +165,7 @@ class ObjDataset(Dataset):
 
     def _safe_elastic_distort(self, features):
         """
-        Apply ElasticDistortion defensively. Some torch_points3d versions return a
+        Apply ElasticDistortion defensively. Some torch_points3d builds return a
         `pos` tensor whose shape does not match the input (e.g. a 2-element bounds
         array) when called on a bare `Data(pos=...)` without the full Batch/`pos`
         bookkeeping fields. That triggers a NumPy broadcast error of the form

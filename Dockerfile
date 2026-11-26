@@ -23,7 +23,7 @@ RUN pip install torch-scatter torch-sparse torch-cluster torch-spline-conv \
         -f https://data.pyg.org/whl/torch-2.3.1+cu121.html \
  && pip install torch-geometric
 
-# 3) Код проекта (включая шим torch_points3d/ и все сети/даталоадеры)
+# 3) Код проекта (все сети/даталоадеры + utils/elastic_distortion.py)
 COPY . /app
 
 # Точки монтирования для датасета (read-only) и артефактов обучения (челноки/логи).

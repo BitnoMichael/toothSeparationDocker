@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import Dataset
 import random
 from tqdm import tqdm
-from torch_points3d.core.data_transform import ElasticDistortion
+from utils.elastic_distortion import ElasticDistortion
 from torch_geometric.data import Data
 
 

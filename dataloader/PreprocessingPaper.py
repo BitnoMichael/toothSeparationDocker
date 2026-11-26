@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from torch_geometric.data import Data
 
-from torch_points3d.core.data_transform import ElasticDistortion
+from utils.elastic_distortion import ElasticDistortion
 
 PAPER_NUM_POINTS = 65536
 PAPER_ROT_MAX = np.pi / 18.0      # +/- 10 degrees
@@ -120,7 +120,7 @@ def elastic_distort(features, elastic_distortion=None):
     returned shape and fall back to the un-distorted positions if anything
     looks wrong, so one bad augmentation never stalls training.
     """
-    from torch_points3d.core.data_transform import ElasticDistortion
+    from utils.elastic_distortion import ElasticDistortion
     if elastic_distortion is None:
         elastic_distortion = ElasticDistortion(apply_distorsion=True,
                                                granularity=[0.2, 0.8],
