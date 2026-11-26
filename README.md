@@ -29,7 +29,11 @@ The model processes 65,536-point 6-D point clouds (XYZ + RGB) and is trained wit
 - Python >= 3.8
 - PyTorch >= 1.13 (образ зафиксирован на PyTorch 2.3.1 + CUDA 12.1)
 - torch-geometric + `torch-scatter`/`torch-sparse`/`torch-cluster`/`torch-spline-conv`
-- `torch_points3d` — в репозиторий встроен **локальный shim** `torch_points3d/`, реализующий только нужный проекту класс `ElasticDistortion`. Полный пакет `torch-points3d` ставить **не нужно** (он не указан в `requirements.txt`).
+- `torch_points3d` — **не требуется**. Класс `ElasticDistortion` реализован в `utils/elastic_distortion.py`:
+  точная копия алгоритма upstream (`granularity` — размер ячейки шума, `magnitude` — амплитуда смещения,
+  обе величины в единицах координат), на чистом numpy, без scipy и без тяжёлой сборки сетки шума.
+  Если настоящий `torch-points3d` установлен, его можно включить переменной окружения `TP3D_USE_UPSTREAM=1`
+  (при неверной форме выхода модуль сам откатится на локальную реализацию).
 - open3d, trimesh, scikit-learn (graph preprocessing)
 - numpy, tqdm, pandas, einops
 - optuna (hyperparameter optimization)
@@ -217,9 +221,11 @@ docker run --gpus all --rm --shm-size=16g \
 
 ### Аугментации и ElasticDistortion
 
-Аугментации (`_augment_features` + `ElasticDistortion`) применяются **только к train-датасету**; для val-датасета `augment=False` (см. `Train_Hybrid.py`, два отдельных `ObjDataset`). Раньше единый датасет с `augment=True` кормил оба сэмплера, и первый же val-прогон на сломанном `torch_points3d` каскадно падал ~252 раза.
+Аугментации (`_augment_features` + `ElasticDistortion`) применяются **только к train-датасету**; для val-датасета `augment=False` (см. `Train_Hybrid.py`, два отдельных `ObjDataset`). Раньше единый датасет с `augment=True` кормил оба сэмплера, и первый же val-прогон каскадно падал ~252 раза.
 
-`ElasticDistortion` теперь обёрнут защитно во всех даталоадерах (`DataLoader_HybridTransformer`, `DataLoader_DentalMAN`, `PreprocessingPaper.elastic_distort` — покрывает PNet/PP/kpconv/Cust_DGCNN): возвращаемая форма валидируется, при несовпадении искажение пропускается, а не падает. Сам shim `torch_points3d/core/data_transform.py` тоже исправлен: ранее `granularity=(0.2, 0.8)` давал `grid_shape` длины 2, и `(N,3) * (2,)` выбрасывало ровно ту ошибку из лога HF jobs. Для отладки можно полностью отключить аугментации флагом `--no_augment`.
+`ElasticDistortion` живёт в `utils/elastic_distortion.py` (папка-шим `torch_points3d/` удалена — она перекрывала настоящий пакет). Реализация повторяет upstream-семантику: `granularity` — размер ячейки шума, `magnitude` — амплитуда смещения, **обе величины в единицах координат (мм)**; итоговое смещение `interp(coords) * magnitude`. Раньше в шиме было `disp * magnitude * extent_bbox` — на сканах 3DTeethSeg (размах 60–80 мм) это давало смещение до 100 мм и полностью разрушало геометрию зубов, из-за чего модель выучивала только априорный класс (фон): val accuracy ≈ доля фона, val mIoU ≈ prior baseline.
+
+Модуль работает на чистом numpy (без scipy), сетка шума ограничена `MAX_GRID_CELLS=128`, выходная форма валидируется. Если установлен настоящий `torch-points3d`, его можно включить через `TP3D_USE_UPSTREAM=1` — тогда вызывается upstream, а при неверной форме `pos` происходит автоматический откат на локальную реализацию. Для отладки аугментации полностью отключаются флагом `--no_augment`.
 
 ### Пути в других `Train_*.py` / `Test_*.py`
 

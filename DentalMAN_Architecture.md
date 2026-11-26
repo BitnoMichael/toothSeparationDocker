@@ -699,7 +699,7 @@ Applied in `ObjDataset_Arch.__getitem__`:
 1. **Rotation**: Z-axis ±10° with 50% probability
 2. **Scaling**: Anisotropic 0.9–1.1 per axis
 3. **Color jitter**: RGB ±0.1 uniform
-4. **Elastic distortion**: via `torch_points3d` granularity=[0.2,0.8], magnitude=[0.4,1.6]
+4. **Elastic distortion**: via `utils/elastic_distortion.py` (upstream-семантика), granularity=[0.2,0.8] мм, magnitude=[0.4,1.6] мм
 5. **Subsampling**: Random choice of `num_points` from available vertices
 6. **Normalization**: Zero-centering + unit sphere scaling
 
