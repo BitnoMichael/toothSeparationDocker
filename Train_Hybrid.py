@@ -200,6 +200,9 @@ class DentalSegmentationTrainer:
             'best_score': self.best_score,
             'early_stop_counter': self.early_stop_counter,
             'val_ema': float(self.val_ema) if self.val_ema is not None else 0.0,
+            # Тип метрики: без него нельзя понять, сравнима ли best_mIoU
+            # из старого чекпоинта с текущей метрикой.
+            'metric': self.config.get('metric', 'confusion'),
         }
 
     def load_checkpoint(self, checkpoint_path):
@@ -213,15 +216,31 @@ class DentalSegmentationTrainer:
         self.model.load_state_dict(checkpoint['model_state_dict'])
         print("✅ Model weights loaded successfully")
 
-        if 'best_miou' in checkpoint:
+        # --- сравнимость порога early stopping ------------------------------
+        # Если чекпоинт сохранён по ДРУГОЙ метрике (legacy mIoU по образцам vs
+        # confusion-mIoU за эпоху), его best_mIoU нельзя сравнивать с текущей
+        # метрикой: значения на разных шкалах. Иначе early stopping срабатывает
+        # сразу или не срабатывает никогда.
+        ckpt_metric = checkpoint.get('metric')
+        cur_metric = self.config.get('metric', 'confusion')
+        # У чекпоинтов, сохранённых ДО патча, ключа 'metric' нет - они всегда
+        # считались legacy-метрикой (среднее по образцам).
+        if ckpt_metric is None:
+            ckpt_metric = 'legacy'
+        metric_changed = ckpt_metric != cur_metric
+        if metric_changed:
+            print(f"⚠️  В чекпоинте метрика '{ckpt_metric}', а сейчас '{cur_metric}' — "
+                  f"значения несопоставимы.")
+            print("    Сбрасываю порог early stopping (best/patience/EMA) в 0.")
+            print("    (Чтобы начать с чистого листа - добавьте --fresh_start.)")
+        if 'best_miou' in checkpoint and not metric_changed:
             self.best_miou = checkpoint['best_miou']
             print(f"✅ Loaded best mIoU: {self.best_miou:.4f}")
-        # Чекпоинты, сохранённые до патча, содержат только best_miou - считаем его score.
-        self.best_score = checkpoint.get('best_score', self.best_miou)
-        if 'early_stop_counter' in checkpoint:
+        self.best_score = 0.0 if metric_changed else checkpoint.get('best_score', self.best_miou)
+        if 'early_stop_counter' in checkpoint and not metric_changed:
             self.early_stop_counter = checkpoint['early_stop_counter']
             print(f"✅ Restored early-stop counter: {self.early_stop_counter}")
-        if checkpoint.get('val_ema'):
+        if checkpoint.get('val_ema') and not metric_changed:
             self.val_ema = float(checkpoint['val_ema'])
 
         if 'optimizer_state_dict' in checkpoint and self.optimizer is not None:
@@ -253,13 +272,45 @@ class DentalSegmentationTrainer:
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.config['lr'],
                                      weight_decay=self.config['weight_decay'])
 
-        if load_checkpoint:
-            # Сначала пробуем "последний" чекпоинт (реальное продолжение
-            # обучения), и только если его нет - лучший (как раньше).
-            last = os.path.join(self.config['save_path'], 'checkpoint_last.pth')
-            best = os.path.join(self.config['save_path'], 'checkpoint_best.pth')
-            checkpoint_path = last if os.path.exists(last) else best
-            return self.load_checkpoint(checkpoint_path)
+        if not load_checkpoint:
+            return 1
+
+        save_path = self.config['save_path']
+        last = os.path.join(save_path, 'checkpoint_last.pth')
+        best = os.path.join(save_path, 'checkpoint_best.pth')
+
+        mode = self.config.get('resume_mode', 'auto')
+        if mode == 'none':
+            print("▶️  --fresh_start: игнорирую существующие чекпоинты, обучение с нуля.")
+            return 1
+        if mode == 'weights_only':
+            # Тёплый старт: берём ТОЛЬКО веса, сбрасываем всю обучающую
+            # историю (best/patience/EMA/номер эпохи) - метрика и разбиение
+            # изменились, старая история к ним неприменима.
+            for p in (best, last):
+                if os.path.exists(p):
+                    print(f"▶️  --resume_weights: беру только веса из {os.path.basename(p)}")
+                    return self._load_weights_only(p)
+            print("⚠️  --resume_weights: чекпоинт не найден, обучение с нуля.")
+            return 1
+
+        # auto: сначала "последний" чекпоинт (реальное продолжение обучения),
+        # и только если его нет - лучший (как раньше).
+        checkpoint_path = last if os.path.exists(last) else best
+        if not os.path.exists(checkpoint_path):
+            print("▶️  Чекпоинт не найден - обучение с нуля.")
+            return 1
+        return self.load_checkpoint(checkpoint_path)
+
+    def _load_weights_only(self, path):
+        """Загрузить только веса модели, сбросив обучающее состояние."""
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.best_miou = 0.0
+        self.best_score = 0.0
+        self.early_stop_counter = 0
+        self.val_ema = None
+        print("✅ Веса загружены, обучающее состояние сброшено (best/patience/EMA = 0).")
         return 1
 
     # ------------------------------------------------------------------ split
@@ -494,6 +545,14 @@ def get_args():
     parser.add_argument('--metric', type=str, default='confusion', choices=['confusion', 'legacy'],
                         help='confusion - устойчивая mIoU за эпоху (по умолчанию); legacy - как раньше')
     parser.add_argument('--gpu_ids', type=str, default='0', help='Видимые GPU (CUDA_VISIBLE_DEVICES)')
+    parser.add_argument('--resume_mode', type=str, default='auto',
+                        choices=['auto', 'none', 'weights_only'],
+                        help='auto - продолжить из checkpoint_last/best; none - с нуля (--fresh_start); '
+                             'weights_only - взять только веса, сбросив early stopping')
+    parser.add_argument('--fresh_start', action='store_true',
+                        help='Игнорировать существующие чекпоинты и обучаться с нуля')
+    parser.add_argument('--resume_weights', action='store_true',
+                        help='Взять только веса из чекпоинта, сбросив early stopping и счётчики')
     parser.add_argument('--amp', action='store_true',
                         help='Включить смешанную точность (fp16). По умолчанию ВЫКЛЮЧЕНА')
     parser.add_argument('--no_amp', action='store_true',
@@ -510,6 +569,12 @@ def main():
     # Ограничение видимых GPU.
     if args.gpu_ids:
         os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu_ids
+
+    resume_mode = 'auto'
+    if args.fresh_start:
+        resume_mode = 'none'
+    elif args.resume_weights:
+        resume_mode = 'weights_only'
 
     use_amp = bool(args.amp) and torch.cuda.is_available()
     if args.amp and not torch.cuda.is_available():
@@ -542,6 +607,7 @@ def main():
         'ema_alpha': args.ema_alpha,
         'seed': args.seed,
         'metric': args.metric,
+        'resume_mode': resume_mode,
         'debug_model': args.debug_model,
         'no_augment': args.no_augment,
     }
@@ -555,6 +621,7 @@ def main():
     print(f"Save path:   {config['save_path']}")
     print(f"AMP enabled: {config['use_amp']}")
     print(f"Metric:      {config['metric']}")
+    print(f"Resume mode: {config['resume_mode']}")
 
     trainer = DentalSegmentationTrainer(config)
     trainer.train()
