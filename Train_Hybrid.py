@@ -258,7 +258,7 @@ class DentalSegmentationTrainer:
             return start_epoch
 
         print("⚠️ No epoch info in checkpoint. Starting from epoch 1.")
-        return 1
+        return 0
 
     def _initialize_components(self, dataset, load_checkpoint=True):
         self.model = HybridPointTransformer(
@@ -274,7 +274,7 @@ class DentalSegmentationTrainer:
                                      weight_decay=self.config['weight_decay'])
 
         if not load_checkpoint:
-            return 1
+            return 0
 
         save_path = self.config['save_path']
         last = os.path.join(save_path, 'checkpoint_last.pth')
@@ -283,7 +283,7 @@ class DentalSegmentationTrainer:
         mode = self.config.get('resume_mode', 'auto')
         if mode == 'none':
             print("▶️  --fresh_start: игнорирую существующие чекпоинты, обучение с нуля.")
-            return 1
+            return 0
         if mode == 'weights_only':
             # Тёплый старт: берём ТОЛЬКО веса, сбрасываем всю обучающую
             # историю (best/patience/EMA/номер эпохи) - метрика и разбиение
@@ -293,14 +293,14 @@ class DentalSegmentationTrainer:
                     print(f"▶️  --resume_weights: беру только веса из {os.path.basename(p)}")
                     return self._load_weights_only(p)
             print("⚠️  --resume_weights: чекпоинт не найден, обучение с нуля.")
-            return 1
+            return 0
 
         # auto: сначала "последний" чекпоинт (реальное продолжение обучения),
         # и только если его нет - лучший (как раньше).
         checkpoint_path = last if os.path.exists(last) else best
         if not os.path.exists(checkpoint_path):
             print("▶️  Чекпоинт не найден - обучение с нуля.")
-            return 1
+            return 0
 
         # Страховка: перед тем как новый код перезапишет checkpoint_best.pth,
         # сохраняем старую копию - чтобы веса до патча остались доступны
@@ -322,7 +322,7 @@ class DentalSegmentationTrainer:
         self.early_stop_counter = 0
         self.val_ema = None
         print("✅ Веса загружены, обучающее состояние сброшено (best/patience/EMA = 0).")
-        return 1
+        return 0
 
     # ------------------------------------------------------------------ split
     def _build_datasets(self):
@@ -438,8 +438,10 @@ class DentalSegmentationTrainer:
 
         print("--- CONTINUING Training ---")
         print(f"Using device: {self.device}")
-        print(f"Total steps per epoch: {len(train_loader)} | Training epochs: {start_epoch} to {self.config['epochs']}")
-        print(f"Total additional epochs: {self.config['epochs'] - start_epoch + 1}")
+        # start_epoch - индекс цикла (0-based), т.е. первая обучаемая эпоха
+        # имеет 1-based номер start_epoch + 1.
+        print(f"Total steps per epoch: {len(train_loader)} | Training epochs: {start_epoch + 1} to {self.config['epochs']}")
+        print(f"Total additional epochs: {max(0, self.config['epochs'] - start_epoch)}")
         print(f"Metric: {self.config.get('metric', 'confusion')} | AMP: {self.use_amp}")
 
         print("\n🔍 Quick validation to verify model state...")
@@ -453,6 +455,9 @@ class DentalSegmentationTrainer:
             sample_acc = (sample_pred == sample_batch['y'].to(self.device)).float().mean().item()
             print(f"Sample validation accuracy: {sample_acc:.4f}")
 
+        if start_epoch >= self.config['epochs']:
+            print(f"⚠️  start_epoch={start_epoch} >= epochs={self.config['epochs']} — "
+                  f"обучать нечего. Увеличьте --epochs, чтобы продолжить.")
         for epoch in range(start_epoch, self.config['epochs']):
             print(f"\n--- Epoch {epoch + 1}/{self.config['epochs']} ---")
 
@@ -519,7 +524,7 @@ class DentalSegmentationTrainer:
         print(f"\n--- TRAINING COMPLETED ---")
         print(f"Final best validation mIoU (raw): {self.best_miou:.4f}")
         print(f"Final best validation mIoU (EMA): {self.best_score:.4f}")
-        print(f"Training completed from epoch {start_epoch} to {self.config['epochs']}")
+        print(f"Training completed from epoch {start_epoch + 1} to {self.config['epochs']}")
 
 
 def get_args():
