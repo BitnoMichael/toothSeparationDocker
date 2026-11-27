@@ -338,12 +338,27 @@ class DentalSegmentationTrainer:
             print("⚠️  --resume_weights: чекпоинт не найден, обучение с нуля.")
             return 0
 
-        # auto: сначала "последний" чекпоинт (реальное продолжение обучения),
-        # и только если его нет - лучший (как раньше).
-        checkpoint_path = last if os.path.exists(last) else best
+        # Выбор файла чекпоинта для ПРОДОЛЖЕНИЯ обучения.
+        #
+        # По умолчанию (auto) берётся checkpoint_last.pth, а НЕ best.
+        # Причина: при плоской/шумной val-метрике "лучший" чекпоинт -
+        # это статистический выброс (один удачный epoch), а не заведомо
+        # лучшая модель. Для продолжения обучения правильная стартовая
+        # точка - последняя (самая обученная и не «выбранная шумом»).
+        # checkpoint_best.pth при этом продолжает обновляться отдельно -
+        # именно его надо отдавать на финальную оценку.
+        resume_from = self.config.get('resume_from', 'auto')
+        if resume_from == 'last':
+            checkpoint_path = last
+        elif resume_from == 'best':
+            checkpoint_path = best
+        else:
+            checkpoint_path = last if os.path.exists(last) else best
+
         if not os.path.exists(checkpoint_path):
-            print("▶️  Чекпоинт не найден - обучение с нуля.")
+            print(f"▶️  Чекпоинт не найден ({os.path.basename(checkpoint_path)}) - обучение с нуля.")
             return 0
+        print(f"▶️  Продолжаем из {os.path.basename(checkpoint_path)}")
 
         # Страховка: перед тем как новый код перезапишет checkpoint_best.pth,
         # сохраняем старую копию - чтобы веса до патча остались доступны
@@ -635,6 +650,10 @@ def get_args():
     parser.add_argument('--metric', type=str, default='confusion', choices=['confusion', 'legacy'],
                         help='confusion - устойчивая mIoU за эпоху (по умолчанию); legacy - как раньше')
     parser.add_argument('--gpu_ids', type=str, default='0', help='Видимые GPU (CUDA_VISIBLE_DEVICES)')
+    parser.add_argument('--resume_from', type=str, default='auto',
+                        choices=['auto', 'last', 'best'],
+                        help='Из какого чекпоинта продолжать обучение: auto/last (по умолчанию last - '
+                             'это не "выбранный шумом" пик) / best')
     parser.add_argument('--resume_mode', type=str, default='auto',
                         choices=['auto', 'none', 'weights_only'],
                         help='auto - продолжить из checkpoint_last/best; none - с нуля (--fresh_start); '
@@ -703,6 +722,7 @@ def main():
         'seed': args.seed,
         'metric': args.metric,
         'resume_mode': resume_mode,
+        'resume_from': args.resume_from,
         'debug_model': args.debug_model,
         'no_augment': args.no_augment,
     }
@@ -716,7 +736,7 @@ def main():
     print(f"Save path:   {config['save_path']}")
     print(f"AMP enabled: {config['use_amp']}")
     print(f"Metric:      {config['metric']}")
-    print(f"Resume mode: {config['resume_mode']}")
+    print(f"Resume mode: {config['resume_mode']} (from: {config['resume_from']})")
     print(f"Early stop:  patience={config['early_stopping_patience']}, min_epochs={config['min_epochs']}")
     print(f"LR scheduler: {config['scheduler']}")
 
