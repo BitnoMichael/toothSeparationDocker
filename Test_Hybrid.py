@@ -61,6 +61,27 @@ def main():
     loader = DataLoader(dataset, batch_size=config['batch_size'], shuffle=False,
                         num_workers=config['num_workers'])
 
+    # Пересчёт running-статистик BatchNorm на тестовом наборе.
+    # Обучающие BN-статистики - экспоненциальное среднее по последним ~10
+    # случайным сканам (batch_size=1, momentum=0.1). Оценка на 180 других
+    # пациентах с такими "случайными" статистиками даёт зашумлённую метрику.
+    # Пересчёт (без меток) делает финальную цифру воспроизводимой.
+    k = int(os.environ.get('BN_RECALIBRATE', '60'))
+    if k > 0:
+        bns = [m for m in model.modules()
+               if isinstance(m, (torch.nn.BatchNorm1d, torch.nn.BatchNorm2d))]
+        model.eval()
+        for m in bns:
+            m.train()
+        with torch.no_grad():
+            for i, batch in enumerate(loader):
+                if i >= k:
+                    break
+                model(batch['pos'].to(device), batch['x'].to(device))
+        for m in bns:
+            m.eval()
+        print(f"BatchNorm running-stats recalibrated on {k} test samples (labels not used)")
+
     total_acc, total_miou, count = 0.0, 0.0, 0
     rows = []
     with torch.no_grad():

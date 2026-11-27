@@ -205,6 +205,49 @@ class DentalSegmentationTrainer:
                 'accuracy_legacy': total_acc_leg / len(loader),
                 'mIoU_legacy': total_iou_leg / len(loader)}
 
+    # ------------------------------------------------------------------ BatchNorm
+    # КЛЮЧЕВОЙ МЕХАНИЗМ НЕСТАБИЛЬНОСТИ val-метриКИ.
+    #
+    # Во время обучения BatchNorm работает в train-режиме и считает статистики
+    # по текущему батчу. В eval-режиме он использует running-статистики -
+    # экспоненциальное среднее с momentum (по умолчанию 0.1), то есть
+    # усреднение примерно по последним 1/0.1 = 10 батчам. При batch_size=1
+    # это статистики последних ~10 СЛУЧАЙНЫХ сканов обучающей выборки.
+    # Оценка на validation (360 других сканов) идёт с этими "случайными"
+    # статистиками -> каждый epoch метрика скачет, хотя веса меняются
+    # плавно. Поэтому: (а) увеличиваем окно (momentum), (б) по желанию
+    # пересчитываем running-статистики на самом eval-наборе (без меток).
+    def _bn_snapshot(self):
+        return {k: v.detach().clone() for k, v in self.model.state_dict().items()
+                if 'running_mean' in k or 'running_var' in k or 'num_batches_tracked' in k}
+
+    def _bn_restore(self, snap):
+        if not snap:
+            return
+        sd = self.model.state_dict()
+        sd.update(snap)
+        self.model.load_state_dict(sd)
+
+    def _bn_recalibrate(self, loader, k):
+        """Пересчитать running-статистики BN на K образцах eval-набора (метки не используются)."""
+        if not k:
+            return
+        bns = [m for m in self.model.modules()
+               if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d))]
+        if not bns:
+            return
+        self.model.eval()                 # dropout и прочее - как при оценке
+        for m in bns:
+            m.train()                     # но BN пересчитывает статистику
+        with torch.no_grad():
+            for i, batch in enumerate(loader):
+                if i >= k:
+                    break
+                self.model(batch['pos'].to(self.device), batch['x'].to(self.device))
+        for m in bns:
+            m.eval()
+        print(f"    BN пересчитан на {k} образцах eval-набора")
+
     # ------------------------------------------------------------------ checkpoints
     def _state(self, epoch):
         return {
@@ -290,6 +333,15 @@ class DentalSegmentationTrainer:
             nhead=self.config['nhead'],
             debug=self.config.get('debug_model', False)
         ).to(self.device)
+
+        # Окно усреднения running-статистик BatchNorm (см. _bn_recalibrate).
+        bn_momentum = self.config.get('bn_momentum', 0.01)
+        n_bn = 0
+        for m in self.model.modules():
+            if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)):
+                m.momentum = bn_momentum
+                n_bn += 1
+        print(f"✅ BatchNorm: momentum={bn_momentum} (модулей {n_bn})")
 
         class_weights = dataset.get_label_weights().to(self.device)
         self.criterion = FocalLoss(gamma=self.config['focal_gamma'], alpha=class_weights)
@@ -530,8 +582,18 @@ class DentalSegmentationTrainer:
                 print(f"      AMP | scale={self.scaler.get_scale():.0f} "
                       f"| skipped_steps(overflow)={self.amp_overflows}")
 
+            # Пересчёт BN-статистик на eval-наборе (если включён) и оценка.
+            bn_snap = None
+            if self.config.get('bn_recalibrate', 0):
+                bn_snap = self._bn_snapshot()
+                self._bn_recalibrate(val_loader, self.config['bn_recalibrate'])
+
             val_metrics = self.run_epoch(self.model, val_loader, self.criterion, None, is_train=False,
                                          accumulation_steps=1)
+
+            # Возвращаем train-статистики, чтобы обучение не пострадало.
+            if bn_snap is not None:
+                self._bn_restore(bn_snap)
             print(f"Val   | Loss: {val_metrics['loss']:.6f} | Acc: {val_metrics['accuracy']:.4f} "
                   f"| mIoU: {val_metrics['mIoU']:.4f} "
                   f"| mIoU_legacy: {val_metrics['mIoU_legacy']:.4f} "
@@ -643,6 +705,12 @@ def get_args():
     parser.add_argument('--scheduler_t0', type=int, default=20, help='Период косинуса для scheduler')
     parser.add_argument('--scheduler_tmult', type=int, default=2, help='Множитель периода при restart')
     parser.add_argument('--scheduler_eta_min', type=float, default=1e-6, help='Минимальный LR')
+    parser.add_argument('--bn_momentum', type=float, default=0.01,
+                        help='Momentum running-статистик BatchNorm: 0.1 = окно ~10 батчей (шумно), '
+                             '0.01 = окно ~100 батчей (стабильнее)')
+    parser.add_argument('--bn_recalibrate', type=int, default=0,
+                        help='Пересчитать running-статистики BN на N образцах val-набора перед оценкой '
+                             '(0 = выключено). Метки не используются.')
     parser.add_argument('--min_epochs', type=int, default=0,
                         help='Ранний стоп не срабатывает раньше этой эпохи (в базовых скриптах репо MIN_EPOCHS=150)')
     parser.add_argument('--ema_alpha', type=float, default=0.3, help='Коэффициент сглаживания val-метрики (EMA)')
@@ -714,6 +782,8 @@ def main():
         'nhead': args.nhead,
         'early_stopping_patience': args.early_stopping_patience,
         'min_epochs': args.min_epochs,
+        'bn_momentum': args.bn_momentum,
+        'bn_recalibrate': args.bn_recalibrate,
         'scheduler': args.scheduler,
         'scheduler_t0': args.scheduler_t0,
         'scheduler_tmult': args.scheduler_tmult,
@@ -739,6 +809,7 @@ def main():
     print(f"Resume mode: {config['resume_mode']} (from: {config['resume_from']})")
     print(f"Early stop:  patience={config['early_stopping_patience']}, min_epochs={config['min_epochs']}")
     print(f"LR scheduler: {config['scheduler']}")
+    print(f"BatchNorm:   momentum={config['bn_momentum']}, recalibrate={config['bn_recalibrate']}")
 
     trainer = DentalSegmentationTrainer(config)
     trainer.train()
