@@ -203,7 +203,8 @@ class DentalSegmentationTrainer:
             acc, miou = total_acc / len(loader), total_iou / len(loader)
         return {'loss': total_loss / len(loader), 'accuracy': acc, 'mIoU': miou,
                 'accuracy_legacy': total_acc_leg / len(loader),
-                'mIoU_legacy': total_iou_leg / len(loader)}
+                'mIoU_legacy': total_iou_leg / len(loader),
+                'confusion': (meter.conf.cpu().numpy() if use_conf else None)}
 
     # ------------------------------------------------------------------ BatchNorm
     # КЛЮЧЕВОЙ МЕХАНИЗМ НЕСТАБИЛЬНОСТИ val-метриКИ.
@@ -434,6 +435,43 @@ class DentalSegmentationTrainer:
         print("✅ Веса загружены, обучающее состояние сброшено (best/patience/EMA = 0).")
         return 0
 
+    # ------------------------------------------------------------------ per-class
+    @staticmethod
+    def _fdi_code(cls):
+        """Индекс класса (0-52) -> FDI-код зуба (0 = фон)."""
+        if cls == 0:
+            return 0
+        for base, fdi_lo, fdi_hi in ((1, 11, 18), (9, 21, 28), (17, 31, 38),
+                                    (25, 41, 48), (33, 51, 55), (38, 61, 65),
+                                    (43, 71, 75), (48, 81, 85)):
+            if base <= cls < base + (fdi_hi - fdi_lo + 1):
+                return fdi_lo + (cls - base)
+        return -1
+
+    def _dump_per_class(self, conf, epoch):
+        """Выгрузка per-class IoU/precision/recall - показывает, КАКИЕ классы
+        тянут глобальный mIoU вниз (например, редкие молочные зубы)."""
+        path = os.path.join(self.config['save_path'], 'per_class_metrics.csv')
+        new_file = not os.path.exists(path)
+        conf = np.asarray(conf, dtype=np.float64)
+        tp = np.diag(conf)
+        gt = conf.sum(1)
+        pp = conf.sum(0)
+        union = gt + pp - tp
+        with open(path, 'a', newline='') as f:
+            w = csv.writer(f)
+            if new_file:
+                w.writerow(['epoch', 'class_idx', 'fdi_code', 'is_deciduous',
+                            'gt_points', 'pred_points', 'iou', 'precision', 'recall'])
+            for c in range(conf.shape[0]):
+                iou = tp[c] / union[c] if union[c] > 0 else 0.0
+                prec = tp[c] / pp[c] if pp[c] > 0 else 0.0
+                rec = tp[c] / gt[c] if gt[c] > 0 else 0.0
+                w.writerow([epoch, c, self._fdi_code(c), int(c >= 33),
+                            int(gt[c]), int(pp[c]), round(iou, 6),
+                            round(prec, 6), round(rec, 6)])
+        print(f"    per-class метрики -> {os.path.basename(path)}")
+
     # ------------------------------------------------------------------ split
     def _build_datasets(self):
         cfg = self.config
@@ -615,6 +653,9 @@ class DentalSegmentationTrainer:
             # Возвращаем train-статистики, чтобы обучение не пострадало.
             if bn_snap is not None:
                 self._bn_restore(bn_snap)
+
+            if self.config.get('dump_per_class') and val_metrics.get('confusion') is not None:
+                self._dump_per_class(val_metrics['confusion'], epoch + 1)
             print(f"Val   | Loss: {val_metrics['loss']:.6f} | Acc: {val_metrics['accuracy']:.4f} "
                   f"| mIoU: {val_metrics['mIoU']:.4f} "
                   f"| mIoU_legacy: {val_metrics['mIoU_legacy']:.4f} "
@@ -654,7 +695,12 @@ class DentalSegmentationTrainer:
             if is_new_best:
                 print(f"🚀 New best model (EMA mIoU {self.best_score:.4f}, raw {raw:.4f}). "
                       f"Saving to {self.config['save_path']}")
-                torch.save(self._state(epoch), os.path.join(self.config['save_path'], 'checkpoint_best.pth'))
+                best_path = os.path.join(self.config['save_path'], 'checkpoint_best.pth')
+                # Страховка: предыдущий best не теряем при перезаписи.
+                if os.path.exists(best_path):
+                    shutil.copy2(best_path, os.path.join(self.config['save_path'],
+                                                          'checkpoint_best_prev.pth'))
+                torch.save(self._state(epoch), best_path)
 
             # Чекпоинт последней эпохи - для честного продолжения обучения.
             torch.save(self._state(epoch), os.path.join(self.config['save_path'], 'checkpoint_last.pth'))
@@ -726,6 +772,8 @@ def get_args():
     parser.add_argument('--scheduler_t0', type=int, default=20, help='Период косинуса для scheduler')
     parser.add_argument('--scheduler_tmult', type=int, default=2, help='Множитель периода при restart')
     parser.add_argument('--scheduler_eta_min', type=float, default=1e-6, help='Минимальный LR')
+    parser.add_argument('--dump_per_class', action='store_true',
+                        help='Выгружать per-class IoU/precision/recall в per_class_metrics.csv')
     parser.add_argument('--bn_momentum', type=float, default=0.01,
                         help='Momentum running-статистик BatchNorm: 0.1 = окно ~10 батчей (шумно), '
                              '0.01 = окно ~100 батчей (стабильнее)')
@@ -803,6 +851,7 @@ def main():
         'nhead': args.nhead,
         'early_stopping_patience': args.early_stopping_patience,
         'min_epochs': args.min_epochs,
+        'dump_per_class': args.dump_per_class,
         'bn_momentum': args.bn_momentum,
         'bn_recalibrate': args.bn_recalibrate,
         'scheduler': args.scheduler,
@@ -831,6 +880,7 @@ def main():
     print(f"Early stop:  patience={config['early_stopping_patience']}, min_epochs={config['min_epochs']}")
     print(f"LR scheduler: {config['scheduler']}")
     print(f"BatchNorm:   momentum={config['bn_momentum']}, recalibrate={config['bn_recalibrate']}")
+    print(f"Per-class:   {'включён' if config['dump_per_class'] else 'выключен'}")
 
     trainer = DentalSegmentationTrainer(config)
     trainer.train()
