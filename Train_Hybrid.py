@@ -115,6 +115,11 @@ class DentalSegmentationTrainer:
         self.criterion = None
         self.early_stop_counter = 0
         self.patience = config.get('early_stopping_patience', 20)
+        # Как в базовых скриптах репозитория (Train_PointNet*.py, Train_kpconv.py):
+        # early stopping не срабатывает раньше min_epochs, иначе шумная метрика
+        # убивает обучение на 20-40-й эпохе (именно это происходило).
+        self.min_epochs = config.get('min_epochs', 0)
+        self._min_epochs_warned = False
         self.ema_alpha = config.get('ema_alpha', 0.3)
         # AMP scaler для смешанной точности (включается только при наличии CUDA).
         self.use_amp = config.get('use_amp', False)
@@ -517,9 +522,15 @@ class DentalSegmentationTrainer:
                 print(f"💾 Backup saved: {backup_path}")
 
             if self.early_stop_counter >= self.patience:
-                print(f"🛑 Early stopping triggered after {epoch + 1} epochs "
-                      f"(EMA mIoU не улучшался {self.patience} эпох подряд)")
-                break
+                if (epoch + 1) < self.min_epochs:
+                    if not self._min_epochs_warned:
+                        print(f"⏳ Early stopping отложен: минимум {self.min_epochs} эпох "
+                              f"(сейчас {epoch + 1}, EMA не улучшается {self.early_stop_counter} эпох)")
+                        self._min_epochs_warned = True
+                else:
+                    print(f"🛑 Early stopping triggered after {epoch + 1} epochs "
+                          f"(EMA mIoU не улучшался {self.patience} эпох подряд)")
+                    break
 
         print(f"\n--- TRAINING COMPLETED ---")
         print(f"Final best validation mIoU (raw): {self.best_miou:.4f}")
@@ -562,6 +573,8 @@ def get_args():
     parser.add_argument('--val_split', type=float, default=0.2, help='Доля валидации (только при респите)')
     parser.add_argument('--test_split', type=float, default=0.1, help='Доля теста (только при респите)')
     parser.add_argument('--early_stopping_patience', type=int, default=20, help='Ранний стоп после N эпох без улучшения')
+    parser.add_argument('--min_epochs', type=int, default=0,
+                        help='Ранний стоп не срабатывает раньше этой эпохи (в базовых скриптах репо MIN_EPOCHS=150)')
     parser.add_argument('--ema_alpha', type=float, default=0.3, help='Коэффициент сглаживания val-метрики (EMA)')
     parser.add_argument('--seed', type=int, default=42, help='Seed для разбиения и детерминированной валидации')
     parser.add_argument('--metric', type=str, default='confusion', choices=['confusion', 'legacy'],
@@ -626,6 +639,7 @@ def main():
         'd_model': args.d_model,
         'nhead': args.nhead,
         'early_stopping_patience': args.early_stopping_patience,
+        'min_epochs': args.min_epochs,
         'ema_alpha': args.ema_alpha,
         'seed': args.seed,
         'metric': args.metric,
@@ -644,6 +658,7 @@ def main():
     print(f"AMP enabled: {config['use_amp']}")
     print(f"Metric:      {config['metric']}")
     print(f"Resume mode: {config['resume_mode']}")
+    print(f"Early stop:  patience={config['early_stopping_patience']}, min_epochs={config['min_epochs']}")
 
     trainer = DentalSegmentationTrainer(config)
     trainer.train()
