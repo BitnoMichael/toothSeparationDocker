@@ -487,27 +487,48 @@ class DentalSegmentationTrainer:
             )
             # На всякий случай кладём в val-датасет те же веса, что и в train.
             val_dataset.label_weights = train_dataset.label_weights
+            # test-holdout из train-папки НЕ вырезаем: настоящая тестовая
+            # выборка уже лежит отдельной папкой Dataset_900/test.
             train_indices, val_indices = self._patient_level_split(
-                train_dataset, cfg['val_split'], cfg['test_split'], cfg.get('seed', 0))
+                train_dataset, cfg['val_split'], 0.0, cfg.get('seed', 0))
 
         return train_dataset, val_dataset, train_indices, val_indices
 
     @staticmethod
     def _patient_level_split(dataset, val_split, test_split, seed=0):
-        """Разбиение по пациентам: обе челюсти одного case идут в одну выборку."""
+        """Разбиение по пациентам: обе челюсти одного case идут в одну выборку.
+
+        ВАЖНО: здесь НЕ выделяется доля под test. Тестовая выборка лежит
+        отдельной папкой (Dataset_900/test) и создана Split_Data_900.py на
+        уровне пациентов, поэтому вырезать ещё 10 % из train - чистая потеря
+        данных: они не попадут ни в train, ни в val, ни куда-либо ещё.
+        Вместо этого весь остаток train идёт в обучение.
+
+        (test_split остаётся в сигнатуре для совместимости и используется,
+        только если его явно попросили вырезать holdout из train-папки.)
+        """
         patients = sorted({patient_key(p) for p in dataset.obj_files})
         rng = np.random.RandomState(seed)
         order = np.arange(len(patients))
         rng.shuffle(order)
         n_val = int(val_split * len(patients))
-        n_test = int(test_split * len(patients))
         val_patients = {patients[i] for i in order[:n_val]}
-        train_patients = {patients[i] for i in order[n_val + n_test:]}
+        rest = order[n_val:]
+        if test_split > 0:
+            n_test = int(test_split * len(patients))
+            train_patients = {patients[i] for i in rest[n_test:]}
+            dropped = n_test
+        else:
+            train_patients = {patients[i] for i in rest}
+            dropped = 0
 
         train_idx = [i for i, p in enumerate(dataset.obj_files) if patient_key(p) in train_patients]
         val_idx = [i for i, p in enumerate(dataset.obj_files) if patient_key(p) in val_patients]
         print(f"✅ Patient-level split: {len(train_patients)} train / {len(val_patients)} val patients "
               f"-> {len(train_idx)} train / {len(val_idx)} val scans")
+        if dropped:
+            print(f"⚠️  {dropped} пациентов вырезано из train под test-holdout и НЕ используются. "
+                  f"Обычно это лишняя потеря: тестовая выборка уже есть отдельной папкой.")
         return train_idx, val_idx
 
     # ------------------------------------------------------------------ main loop
