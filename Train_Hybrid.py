@@ -34,6 +34,7 @@ Train_Hybrid.py — обучение HybridPointTransformer (53 класса, 3D
 import os
 import csv
 import argparse
+import shutil
 import numpy as np
 import torch
 import torch.nn as nn
@@ -300,6 +301,16 @@ class DentalSegmentationTrainer:
         if not os.path.exists(checkpoint_path):
             print("▶️  Чекпоинт не найден - обучение с нуля.")
             return 1
+
+        # Страховка: перед тем как новый код перезапишет checkpoint_best.pth,
+        # сохраняем старую копию - чтобы веса до патча остались доступны
+        # (например, чтобы сделать тёплый старт с другой метрикой).
+        if checkpoint_path == best:
+            backup = os.path.join(save_path, 'checkpoint_best_prepatch.pth')
+            if os.path.exists(checkpoint_path) and not os.path.exists(backup):
+                shutil.copy2(checkpoint_path, backup)
+                print(f"🗄️  Старый checkpoint_best сохранён как {os.path.basename(backup)}")
+
         return self.load_checkpoint(checkpoint_path)
 
     def _load_weights_only(self, path):
