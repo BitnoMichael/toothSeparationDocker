@@ -42,6 +42,7 @@ import torch.optim as optim
 from torch.utils.data import SubsetRandomSampler
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler, autocast
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 from tqdm import tqdm
 import torch.nn.functional as F
 
@@ -149,6 +150,7 @@ class DentalSegmentationTrainer:
     def run_epoch(self, model, loader, criterion, optimizer, is_train, accumulation_steps=1):
         model.train(is_train)
         total_loss, total_acc, total_iou = 0.0, 0.0, 0.0
+        total_acc_leg, total_iou_leg = 0.0, 0.0
         desc = "Training" if is_train else "Validation"
         meter = ConfusionMeter(self.config['num_classes'], device=self.device)
         use_conf = self.config.get('metric', 'confusion') == 'confusion'
@@ -185,15 +187,23 @@ class DentalSegmentationTrainer:
                 acc = iou = 0.0
             else:
                 acc, iou = self.compute_metrics(outputs, y)
+            # Legacy-метрика (среднее IoU по классам, ПРИСУТСТВУЮЩИМ в образце) -
+            # именно её считает оригинальный Train_Hybrid.py и именно по ней
+            # можно сравниваться с числами статьи (89.51% mIoU).
+            acc_leg, iou_leg = self.compute_metrics(outputs, y)
+            total_acc_leg += acc_leg
+            total_iou_leg += iou_leg
             total_loss += loss.item() * accumulation_steps
             total_acc += acc
             total_iou += iou
 
         if use_conf:
             acc, miou = meter.compute()
-            return {'loss': total_loss / len(loader), 'accuracy': acc, 'mIoU': miou}
-        return {'loss': total_loss / len(loader), 'accuracy': total_acc / len(loader),
-                'mIoU': total_iou / len(loader)}
+        else:
+            acc, miou = total_acc / len(loader), total_iou / len(loader)
+        return {'loss': total_loss / len(loader), 'accuracy': acc, 'mIoU': miou,
+                'accuracy_legacy': total_acc_leg / len(loader),
+                'mIoU_legacy': total_iou_leg / len(loader)}
 
     # ------------------------------------------------------------------ checkpoints
     def _state(self, epoch):
@@ -202,6 +212,8 @@ class DentalSegmentationTrainer:
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scaler_state_dict': self.scaler.state_dict(),
+            'scheduler_state_dict': (self.scheduler.state_dict()
+                                     if self.scheduler is not None else None),
             'best_miou': self.best_miou,
             'best_score': self.best_score,
             'early_stop_counter': self.early_stop_counter,
@@ -257,6 +269,12 @@ class DentalSegmentationTrainer:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
             print("✅ AMP scaler state loaded")
 
+        if (self.scheduler is not None and checkpoint.get('scheduler_state_dict') is not None):
+            # Без этого счётчик CosineAnnealingWarmRestarts сбрасывается и
+            # график LR начинается заново после каждого перезапуска.
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            print("✅ LR scheduler state loaded")
+
         if 'epoch' in checkpoint:
             start_epoch = checkpoint['epoch'] + 1
             print(f"✅ Resuming from epoch {start_epoch}")
@@ -277,6 +295,26 @@ class DentalSegmentationTrainer:
         self.criterion = FocalLoss(gamma=self.config['focal_gamma'], alpha=class_weights)
         self.optimizer = optim.AdamW(self.model.parameters(), lr=self.config['lr'],
                                      weight_decay=self.config['weight_decay'])
+
+        # Планировщик LR. ВО ВСЕХ БАЗОВЫХ скриптах репозитория он есть
+        # (CosineAnnealingWarmRestarts T_0=20, T_mult=2, eta_min=1e-6),
+        # а в Train_Hybrid.py его не было НИКОГДА: главная модель обучалась
+        # с постоянным lr=1e-4 все 250 эпох -> модель быстро застревает в
+        # остром минимуме и переобучается, а val-метрика выходит на плато.
+        self.scheduler = None
+        if self.config.get('scheduler', 'cosine_warm_restarts') == 'cosine_warm_restarts':
+            self.scheduler = CosineAnnealingWarmRestarts(
+                self.optimizer,
+                T_0=self.config.get('scheduler_t0', 20),
+                T_mult=self.config.get('scheduler_tmult', 2),
+                eta_min=self.config.get('scheduler_eta_min', 1e-6),
+            )
+            print(f"✅ LR scheduler: CosineAnnealingWarmRestarts "
+                  f"(T_0={self.config.get('scheduler_t0', 20)}, "
+                  f"T_mult={self.config.get('scheduler_tmult', 2)}, "
+                  f"eta_min={self.config.get('scheduler_eta_min', 1e-6)})")
+        else:
+            print("⚠️  LR scheduler отключён (--scheduler none): постоянный lr")
 
         if not load_checkpoint:
             return 0
@@ -419,7 +457,8 @@ class DentalSegmentationTrainer:
 
         log_file = os.path.join(self.config['save_path'], 'training_log.csv')
         header = ['Epoch', 'Train_Loss', 'Train_Acc', 'Train_mIoU',
-                  'Val_Loss', 'Val_Acc', 'Val_mIoU', 'Val_mIoU_EMA']
+                  'Val_Loss', 'Val_Acc', 'Val_mIoU', 'Val_mIoU_EMA',
+                  'Val_mIoU_legacy', 'Val_Acc_legacy', 'Train_mIoU_legacy']
         if os.path.exists(log_file):
             # Старый лог (7 колонок) несовместим с новым форматом -> сохраняем
             # его отдельно и начинаем новый, чтобы не портить историю.
@@ -470,7 +509,8 @@ class DentalSegmentationTrainer:
                                            is_train=True,
                                            accumulation_steps=self.config['accumulation_steps'])
             print(f"Train | Loss: {train_metrics['loss']:.6f} | Acc: {train_metrics['accuracy']:.4f} "
-                  f"| mIoU: {train_metrics['mIoU']:.4f}")
+                  f"| mIoU: {train_metrics['mIoU']:.4f} "
+                  f"| mIoU_legacy: {train_metrics['mIoU_legacy']:.4f}")
             if self.use_amp:
                 print(f"      AMP | scale={self.scaler.get_scale():.0f} "
                       f"| skipped_steps(overflow)={self.amp_overflows}")
@@ -478,7 +518,9 @@ class DentalSegmentationTrainer:
             val_metrics = self.run_epoch(self.model, val_loader, self.criterion, None, is_train=False,
                                          accumulation_steps=1)
             print(f"Val   | Loss: {val_metrics['loss']:.6f} | Acc: {val_metrics['accuracy']:.4f} "
-                  f"| mIoU: {val_metrics['mIoU']:.4f}")
+                  f"| mIoU: {val_metrics['mIoU']:.4f} "
+                  f"| mIoU_legacy: {val_metrics['mIoU_legacy']:.4f} "
+                  f"(Acc_legacy: {val_metrics['accuracy_legacy']:.4f})")
 
             # Сглаживание: одиночная "шумная" эпоха больше не решает судьбу
             # обучения, а плато считается по устойчивому тренду.
@@ -506,6 +548,9 @@ class DentalSegmentationTrainer:
                     round(val_metrics['accuracy'], 6),
                     round(val_metrics['mIoU'], 6),
                     round(self.val_ema, 6),
+                    round(val_metrics['mIoU_legacy'], 6),
+                    round(val_metrics['accuracy_legacy'], 6),
+                    round(train_metrics['mIoU_legacy'], 6),
                 ])
 
             if is_new_best:
@@ -515,6 +560,10 @@ class DentalSegmentationTrainer:
 
             # Чекпоинт последней эпохи - для честного продолжения обучения.
             torch.save(self._state(epoch), os.path.join(self.config['save_path'], 'checkpoint_last.pth'))
+
+            if self.scheduler is not None:
+                self.scheduler.step()
+                print(f"    LR -> {self.optimizer.param_groups[0]['lr']:.3e}")
 
             if (epoch + 1) % 5 == 0:
                 backup_path = os.path.join(self.config['save_path'], f'backup_epoch_{epoch + 1}.pth')
@@ -573,6 +622,12 @@ def get_args():
     parser.add_argument('--val_split', type=float, default=0.2, help='Доля валидации (только при респите)')
     parser.add_argument('--test_split', type=float, default=0.1, help='Доля теста (только при респите)')
     parser.add_argument('--early_stopping_patience', type=int, default=20, help='Ранний стоп после N эпох без улучшения')
+    parser.add_argument('--scheduler', type=str, default='cosine_warm_restarts',
+                        choices=['cosine_warm_restarts', 'none'],
+                        help='Планировщик LR (в базовых скриптах репо: CosineAnnealingWarmRestarts)')
+    parser.add_argument('--scheduler_t0', type=int, default=20, help='Период косинуса для scheduler')
+    parser.add_argument('--scheduler_tmult', type=int, default=2, help='Множитель периода при restart')
+    parser.add_argument('--scheduler_eta_min', type=float, default=1e-6, help='Минимальный LR')
     parser.add_argument('--min_epochs', type=int, default=0,
                         help='Ранний стоп не срабатывает раньше этой эпохи (в базовых скриптах репо MIN_EPOCHS=150)')
     parser.add_argument('--ema_alpha', type=float, default=0.3, help='Коэффициент сглаживания val-метрики (EMA)')
@@ -640,6 +695,10 @@ def main():
         'nhead': args.nhead,
         'early_stopping_patience': args.early_stopping_patience,
         'min_epochs': args.min_epochs,
+        'scheduler': args.scheduler,
+        'scheduler_t0': args.scheduler_t0,
+        'scheduler_tmult': args.scheduler_tmult,
+        'scheduler_eta_min': args.scheduler_eta_min,
         'ema_alpha': args.ema_alpha,
         'seed': args.seed,
         'metric': args.metric,
@@ -659,6 +718,7 @@ def main():
     print(f"Metric:      {config['metric']}")
     print(f"Resume mode: {config['resume_mode']}")
     print(f"Early stop:  patience={config['early_stopping_patience']}, min_epochs={config['min_epochs']}")
+    print(f"LR scheduler: {config['scheduler']}")
 
     trainer = DentalSegmentationTrainer(config)
     trainer.train()
