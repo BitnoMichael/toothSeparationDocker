@@ -32,7 +32,7 @@ def patient_key(path):
 class ObjDataset(Dataset):
     def __init__(self, obj_dir, json_dir, num_points=8192, augment=True,
                  max_vertices=100000, binary=False, num_classes=53,
-                 deterministic=False, seed=0): # Change default to 53
+                 deterministic=False, seed=0, compute_weights=True): # Change default to 53
         self.obj_dir = obj_dir
         self.json_dir = json_dir
         self.num_points = num_points
@@ -68,7 +68,13 @@ class ObjDataset(Dataset):
         if not self.obj_files:
             raise ValueError("No valid .obj/.json pairs found in the provided directories")
         print(f"Found {len(self.obj_files)} valid .obj/.json pairs")
-        self.label_weights = self._compute_label_weights()
+        # Веса классов нужны только для loss на train-выборке. Для val-датасета
+        # их считать бессмысленно: это повторный проход по всем .json
+        # (на 1260 файлах - ~100 секунд) впустую.
+        if compute_weights:
+            self.label_weights = self._compute_label_weights()
+        else:
+            self.label_weights = None
 
     def _compute_label_weights(self):
         label_counts = np.zeros(self.num_classes)
@@ -275,4 +281,7 @@ class ObjDataset(Dataset):
             return self.__getitem__((idx + 1) % len(self), _depth=_depth + 1)
 
     def get_label_weights(self):
+        if self.label_weights is None:
+            raise RuntimeError("Веса классов не вычислялись для этого датасета "
+                               "(compute_weights=False).")
         return self.label_weights

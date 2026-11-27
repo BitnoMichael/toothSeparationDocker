@@ -354,7 +354,10 @@ class DentalSegmentationTrainer:
                 num_classes=cfg['num_classes'],
                 deterministic=True,
                 seed=cfg.get('seed', 0),
+                compute_weights=False,   # веса считаем один раз, на train
             )
+            # На всякий случай кладём в val-датасет те же веса, что и в train.
+            val_dataset.label_weights = train_dataset.label_weights
             val_indices = list(range(len(val_dataset)))
             train_indices = list(range(len(train_dataset)))
             print(f"✅ Using provided validation folder: {val_data_path} "
@@ -370,7 +373,10 @@ class DentalSegmentationTrainer:
                 num_classes=cfg['num_classes'],
                 deterministic=True,
                 seed=cfg.get('seed', 0),
+                compute_weights=False,   # веса считаем один раз, на train
             )
+            # На всякий случай кладём в val-датасет те же веса, что и в train.
+            val_dataset.label_weights = train_dataset.label_weights
             train_indices, val_indices = self._patient_level_split(
                 train_dataset, cfg['val_split'], cfg['test_split'], cfg.get('seed', 0))
 
