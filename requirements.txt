@@ -15,3 +15,5 @@ plyfile
 pymeshlab
 matplotlib
 seaborn
+torchsummary
+thop
