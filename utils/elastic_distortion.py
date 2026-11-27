@@ -50,6 +50,20 @@ except ImportError:  # numpy-ядро работает и без torch (тест
     torch = None
 
 # Порядок величин сетки шума: не даём памяти уйти в гигабайты на сэмпл.
+# РАЗРЕШЕНО вручную (2026-11-26): конфликт слияния E4/E5 разрушал файл.
+# Взята векторизованная реализация из E4, но с MAX_GRID_CELLS = 128.
+#
+# Почему 128, а не 64: upstream torch-points3d строит сетку шума как
+#   noise_dim = ceil(bbox / granularity) + 3
+# т.е. для скана 3DTeethSeg (размах ~70 мм) при granularity = 0.2-0.8 мм
+# получается ~90-350 ячеек по оси. Значение 128 соответствует середине этого
+# диапазона и даёт eff_gran = extent/128 ~ 0.55 мм - то есть ту же частоту
+# поля шума, что и upstream. При 64 ячейках eff_gran ~ 1.1 мм, шум становится
+# вдвое-вчетверо более крупномасштабным, т.е. искажение слабее, чем в статье.
+#
+# Замер на 100k точек (сканы 3DTeethSeg): 128^3 -> 440 мс/сэмпл (+6.5 мин к
+# каждой эпохе), 64^3 -> 103 мс/сэмпл (+1.5 мин к эпохе). Амплитуда смещения
+# при этом не меняется - меняется только частота поля (размер ячейки шума).
 MAX_GRID_CELLS = 128
 
 # Оригинальные параметры статьи трактуются в миллиметрах (единицы координат):
@@ -81,27 +95,52 @@ def _load_upstream():
 
 # ------------------------------------------------------------- numpy-порт
 def _smooth_axis(arr, axis):
-    """Сглаживание ядром [1,2,1]/4 вдоль оси, падение константой 0 (cval=0)."""
-    a = np.moveaxis(arr, axis, 0)
-    z = np.zeros((1,) + a.shape[1:], dtype=a.dtype)
-    pad = np.concatenate([z, a, z], axis=0)
-    return np.moveaxis((pad[:-2] + 2.0 * pad[1:-1] + pad[2:]) * 0.25, 0, axis)
+    """Сглаживание ядром [1,2,1]/4 вдоль оси, падение константой 0 (cval=0).
+
+    Считаем без np.concatenate (копия массива 128^3 x 3 на каждой оси стоила
+    больше, чем сама интерполяция) и без np.moveaxis, чтобы результат всегда
+    оставался C-контигуосным: иначе последующий reshape() молча делал бы
+    ещё одну полную копию.
+    """
+    out = np.empty_like(arr)
+
+    def sl(start, stop):
+        idx = [slice(None)] * arr.ndim
+        idx[axis] = slice(start, stop)
+        return tuple(idx)
+
+    # внутренние отсчёты: (prev + 2*cur + next) / 4
+    out[sl(1, -1)] = (arr[sl(None, -2)] + 2.0 * arr[sl(1, -1)] + arr[sl(2, None)]) * 0.25
+    # края: за границей - нулевая паддинг-строка
+    out[sl(0, 1)] = (2.0 * arr[sl(0, 1)] + arr[sl(1, 2)]) * 0.25
+    out[sl(-1, None)] = (arr[sl(-2, -1)] + 2.0 * arr[sl(-1, None)]) * 0.25
+    return out
 
 
 def _trilinear_sample(grid, coords):
-    """Трилинейная интерполяция: grid (nx,ny,nz), coords (3,N) в индексах сетки."""
-    shape = np.array(grid.shape, dtype=np.int64)
-    c = [np.clip(coords[d], 0.0, shape[d] - 1.0 - 1e-6) for d in range(3)]
-    i0 = [np.floor(c[d]).astype(np.int64) for d in range(3)]
+    """Трилинейная интерполяция сразу по всем каналам.
+
+    grid  : (nx, ny, nz, C) - значения каналов
+    coords: (3, N) - индексы в сетке (дробные)
+    Возвращает (N, C).
+
+    Сетка хранится вплотивную, поэтому на каждую из 8 октантов приходится
+    ОДИН gather на (N, C), а не по одному на каждый канал отдельно.
+    """
+    nx, ny, nz = grid.shape[:3]
+    c = [np.clip(coords[d], 0.0, (nx, ny, nz)[d] - 1.0 - 1e-6) for d in range(3)]
+    i0 = [np.floor(c[d]).astype(np.intp) for d in range(3)]
     f = [c[d] - i0[d] for d in range(3)]
-    out = np.zeros(coords.shape[1], dtype=np.float64)
+    flat = grid.reshape(-1, grid.shape[3])
+    out = np.zeros((coords.shape[1], grid.shape[3]), dtype=grid.dtype)
     for bx in (0, 1):
+        wx = f[0] if bx else (1.0 - f[0])
         for by in (0, 1):
+            wy = f[1] if by else (1.0 - f[1])
             for bz in (0, 1):
-                w = ((1.0 - f[0]) if bx == 0 else f[0]) \
-                    * ((1.0 - f[1]) if by == 0 else f[1]) \
-                    * ((1.0 - f[2]) if bz == 0 else f[2])
-                out += w * grid[i0[0] + bx, i0[1] + by, i0[2] + bz]
+                wz = f[2] if bz else (1.0 - f[2])
+                idx = ((i0[0] + bx) * ny + (i0[1] + by)) * nz + (i0[2] + bz)
+                out += (wx * wy * wz)[:, None] * flat[idx]
     return out
 
 
@@ -137,14 +176,13 @@ def elastic_distortion_np(points, granularity=DEFAULT_GRANULARITY,
 
     ax_min = coords_min - eff_gran
     ax_max = coords_min + eff_gran * (noise_dim - 2)
-    coords = np.empty((points.shape[0], 3), dtype=np.float64)
+    coords = np.empty((points.shape[0], 3), dtype=np.float32)
     for d in range(3):
         span = max(ax_max[d] - ax_min[d], 1e-8)
         coords[:, d] = (points[:, d] - ax_min[d]) * (noise_dim[d] - 1) / span
 
-    disp = np.empty_like(coords)
-    for d in range(3):
-        disp[:, d] = _trilinear_sample(noise[..., d], coords.T)
+    # (N, C) - все три компоненты смещения за один проход по сетке.
+    disp = _trilinear_sample(noise, coords.T)
 
     # magnitude - это амплитуда в мм, а НЕ множитель размера bounding box.
     return (points + disp * mag_val).astype(np.float32)

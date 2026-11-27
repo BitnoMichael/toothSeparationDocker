@@ -13,9 +13,26 @@ from utils.elastic_distortion import ElasticDistortion
 from torch_geometric.data import Data
 
 
+def patient_key(path):
+    """Идентификатор пациента (case) по пути к .obj.
+
+    В датасете 3DTeethSeg'22 один case = один пациент, а сканы хранятся как
+    <case_id>/<case_id>_lower.obj и <case_id>/<case_id>_upper.obj
+    (см. Split_Data_900.py, который пишет "<case>_lower"/"<case>_upper").
+    Поэтому "_lower"/"_upper" отбрасываются, чтобы обе челюсти одного
+    пациента попали в одну и ту же выборку.
+    """
+    stem = os.path.splitext(os.path.basename(path))[0]
+    for suffix in ('_lower', '_upper'):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
+
+
 class ObjDataset(Dataset):
     def __init__(self, obj_dir, json_dir, num_points=8192, augment=True,
-                 max_vertices=100000, binary=False, num_classes=53): # Change default to 53
+                 max_vertices=100000, binary=False, num_classes=53,
+                 deterministic=False, seed=0): # Change default to 53
         self.obj_dir = obj_dir
         self.json_dir = json_dir
         self.num_points = num_points
@@ -23,6 +40,11 @@ class ObjDataset(Dataset):
         self.max_vertices = max_vertices
         self.binary = binary
         self.num_classes = num_classes # Should be 53 for FDI
+        # deterministic=True -> одна и та же подвыборка точек на каждую эпоху.
+        # Нужен для validation: иначе набор точек меняется каждый эпох и
+        # метрика колеблется даже при неизменной модели.
+        self.deterministic = deterministic
+        self.seed = seed
 
         if self.augment:
             self.elastic_distortion = ElasticDistortion(
@@ -190,6 +212,17 @@ class ObjDataset(Dataset):
             print(f"Warning: ElasticDistortion failed ({e}). Skipping distortion for this sample.")
         return features
 
+    def _rng(self, idx):
+        """Генератор случайных чисел для каждого индекса.
+
+        deterministic=True -> фиксированный seed на индекс (одинаковая
+        подвыборка точек во все эпохи). deterministic=False -> общий np.random
+        (поведение обучения: случайность нужна).
+        """
+        if self.deterministic:
+            return np.random.default_rng(self.seed * 1000003 + int(idx))
+        return np.random
+
     def __len__(self):
         return len(self.obj_files)
 
@@ -205,7 +238,7 @@ class ObjDataset(Dataset):
             features, labels = features[:min_len], labels[:min_len]
 
             if self.max_vertices and len(features) > self.max_vertices:
-                indices = np.random.choice(len(features), self.max_vertices, replace=False)
+                indices = self._rng(idx).choice(len(features), self.max_vertices, replace=False)
                 features, labels = features[indices], labels[indices]
 
             if self.augment:
@@ -216,9 +249,9 @@ class ObjDataset(Dataset):
             labels = self._remap_labels(labels) # Apply the new remapping
 
             if len(features) < self.num_points:
-                indices = np.random.choice(len(features), self.num_points, replace=True)
+                indices = self._rng(idx).choice(len(features), self.num_points, replace=True)
             else:
-                indices = np.random.choice(len(features), self.num_points, replace=False)
+                indices = self._rng(idx).choice(len(features), self.num_points, replace=False)
 
             features, labels = features[indices], labels[indices]
 

@@ -3,12 +3,25 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def furthest_point_sample(xyz, npoint):
+def furthest_point_sample(xyz, npoint, deterministic=False):
+    """FPS.
+
+    deterministic=False (по умолчанию, поведение оригинального репозитория):
+        стартовая точка выбирается случайно -> КАЖДЫЙ вызов даёт другой набор
+        центроидов, даже на одном и том же входе.
+
+    deterministic=True (режим eval):
+        стартовая точка фиксирована (индекс 0) -> набор центроидов
+        воспроизводим, метрика на validation перестаёт "дышать" между эпохами.
+    """
     device = xyz.device
     B, N, C = xyz.shape
     centroids = torch.zeros(B, npoint, dtype=torch.long).to(device)
     distance = torch.ones(B, N).to(device) * 1e10
-    farthest = torch.randint(0, N, (B,), dtype=torch.long).to(device)
+    if deterministic:
+        farthest = torch.zeros(B, dtype=torch.long).to(device)
+    else:
+        farthest = torch.randint(0, N, (B,), dtype=torch.long).to(device)
     batch_indices = torch.arange(B, dtype=torch.long).to(device)
     for i in range(npoint):
         centroids[:, i] = farthest
@@ -73,7 +86,9 @@ class PointNetSetAbstraction(nn.Module):
         if self.group_all:
             new_xyz = torch.zeros(xyz.shape[0], 1, 3).to(xyz.device)
         else:
-            new_xyz_idx = furthest_point_sample(xyz, self.npoint)
+            # В eval-режиме FPS детерминирован: иначе val-метрика скачет
+            # от эпохи к эпохе только из-за случайной стартовой точки.
+            new_xyz_idx = furthest_point_sample(xyz, self.npoint, deterministic=not self.training)
             new_xyz = index_points(xyz, new_xyz_idx)
 
         #if self.debug: print(f"Sampled new_xyz: {new_xyz.shape}")
