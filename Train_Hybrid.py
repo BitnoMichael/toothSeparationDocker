@@ -485,6 +485,7 @@ class DentalSegmentationTrainer:
             binary=cfg['binary'],
             num_classes=cfg['num_classes'],
             deterministic=False,
+            class_weight_mode=cfg.get('class_weight_mode', 'legacy'),
         )
 
         # --- валидация -------------------------------------------------------
@@ -806,6 +807,11 @@ def get_args():
     parser.add_argument('--no_augment', action='store_true',
                         help='Отключить аугментации (включая ElasticDistortion). Полезно при отладке.')
     parser.add_argument('--debug_model', action='store_true', help='Отладочный режим модели')
+    parser.add_argument('--class_weight_mode', choices=['legacy', 'present'], default='legacy',
+                        help='legacy (по умолчанию, как в оригинале): пустые классы получают '
+                             'максимальный вес. present: веса только по классам, встречающимся '
+                             'в train. На AdamW разница = постоянный множитель, на обучение '
+                             'не влияет (см. _compute_label_weights).')
     return parser.parse_args()
 
 
@@ -865,6 +871,7 @@ def main():
         'resume_from': args.resume_from,
         'debug_model': args.debug_model,
         'no_augment': args.no_augment,
+        'class_weight_mode': args.class_weight_mode,
     }
 
     print("--- CONTINUING Training from Last Checkpoint (53 classes) ---")

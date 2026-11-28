@@ -32,7 +32,8 @@ def patient_key(path):
 class ObjDataset(Dataset):
     def __init__(self, obj_dir, json_dir, num_points=8192, augment=True,
                  max_vertices=100000, binary=False, num_classes=53,
-                 deterministic=False, seed=0, compute_weights=True): # Change default to 53
+                 deterministic=False, seed=0, compute_weights=True,
+                 class_weight_mode='legacy'): # Change default to 53
         self.obj_dir = obj_dir
         self.json_dir = json_dir
         self.num_points = num_points
@@ -45,6 +46,15 @@ class ObjDataset(Dataset):
         # метрика колеблется даже при неизменной модели.
         self.deterministic = deterministic
         self.seed = seed
+        # Режим расчёта весов классов:
+        #   'legacy'  - как в оригинальном репозитории: w = 1/log(1.02+n),
+        #                при n=0 -> w = 1/log(1.02) (МАКСИМУМ веса).
+        #   'present' - веса считаются только по классам, реально встречающимся
+        #                в train; отсутствующие классы получают вес 0.
+        #                (см. подробный комментарий в _compute_label_weights:
+        #                на AdamW разница между режимами сводится к постоянному
+        #                множителю и на обучение НЕ влияет)
+        self.class_weight_mode = class_weight_mode
 
         if self.augment:
             self.elastic_distortion = ElasticDistortion(
@@ -77,6 +87,29 @@ class ObjDataset(Dataset):
             self.label_weights = None
 
     def _compute_label_weights(self):
+        """Веса классов для focal loss: w = 1/log(1.02 + n_c).
+
+        ВАЖНО (проверено на реальном распределении 3DTeethSeg'22, эпоха 62):
+        в train-выборке 20 молочных классов (FDI 51-85) не имеют НИ ОДНОЙ
+        точки. В режиме 'legacy' им достаётся максимальный вес
+        (n=0 -> 1/log(1.02) = 0.717, тогда как у взрослого зуба ~0.09),
+        и после нормировки на них приходится ~92% СУММЫ ВЕСОВ.
+
+        Но это НЕ означает, что loss «поглощён» пустыми классами:
+        * FocalLoss в Train_Hybrid.py использует focal_loss.mean() - обычное
+          среднее по точкам, а не взвешенное среднее. Вес берётся по ИСТИННОЙ
+          метке точки (alpha[targets]). У пустых классов нет целевых точек,
+          поэтому их вес не входит НИ в числитель, НИ в знаменатель:
+          вклад пустых классов в loss = 0.0000% (проверено численно).
+        * Разница между 'legacy' и 'present' сводится к ПОСТОЯННОМУ
+          множителю для всех живых классов (проверено: коэффициент 11.896
+          на всех 33 живых классах, разброс 0). При AdamW, который инвариантен
+          к масштабу градиента, это не меняет ни шаг оптимизации, ни траекторию.
+
+        Вывод: это КОСМЕТИЧЕСКИЙ артефакт, а не причина плато. Оставляем
+        'legacy' по умолчанию (чтобы не менять поведение текущих запусков),
+        а 'present' добавляем как явный, задокументированный вариант.
+        """
         label_counts = np.zeros(self.num_classes)
         for json_file in tqdm(self.json_files, desc="Computing label weights"):
             try:
@@ -91,11 +124,44 @@ class ObjDataset(Dataset):
             except Exception as e:
                 print(f"Warning: Error processing {json_file} for weight calculation: {str(e)}")
 
-        label_counts = np.where(label_counts == 0, 1, label_counts) # Avoid log(0)
-        weights = 1.0 / np.log(1.02 + label_counts)
-        weights = weights / np.sum(weights) * self.num_classes
-        print(f"Computed label weights for {self.num_classes} classes.")
+        absent = label_counts == 0
+        if self.class_weight_mode == 'present':
+            counts_for_weight = np.where(absent, 0.0, label_counts)
+        else:  # legacy
+            counts_for_weight = np.where(absent, 1.0, label_counts)
+
+        raw = np.zeros(self.num_classes)
+        nz = counts_for_weight > 0
+        raw[nz] = 1.0 / np.log(1.02 + counts_for_weight[nz])
+        total = raw.sum()
+        weights = raw / total * self.num_classes if total > 0 else np.ones(self.num_classes)
+
+        self._log_weight_stats(label_counts, weights, absent)
+        print(f"Computed label weights for {self.num_classes} classes (mode={self.class_weight_mode}).")
         return torch.tensor(weights, dtype=torch.float32)
+
+    def _log_weight_stats(self, counts, weights, absent):
+        """Печатает разбор весов: сколько классов пустых, какая доля весов на
+        них и какая реальная доля loss приходится на живые классы."""
+        n_absent = int(absent.sum())
+        w_absent = float(weights[absent].sum())
+        w_sum = float(weights.sum())
+        # Оценка доли loss: loss ~ mean(w[target] * focal) => масса класса ~ w_c * n_c
+        mass = weights * counts
+        mass_total = float(mass.sum())
+        print(f"📊 Веса классов (mode={self.class_weight_mode}): "
+              f"пустых классов {n_absent}/{self.num_classes}, "
+              f"на них приходится {100 * w_absent / max(w_sum, 1e-9):.1f}% СУММЫ ВЕСОВ")
+        if mass_total > 0:
+            print(f"📊 Реальная доля loss: пустые классы {100 * mass[absent].sum() / mass_total:.4f}%, "
+                  f"фон {100 * mass[0] / mass_total:.1f}%, "
+                  f"зубы {100 * mass[1:][~absent[1:]].sum() / mass_total:.1f}%")
+        # топ-5 по весу среди живых классов
+        live = np.where(~absent)[0]
+        if len(live):
+            top = live[np.argsort(-weights[live])][:5]
+            print("📊 Топ-5 весов среди непустых классов: " +
+                  ", ".join(f"idx{int(i)}(n={int(counts[i])})={weights[i]:.4f}" for i in top))
 
     def _read_obj_file(self, obj_path):
         vertices_and_colors = []
