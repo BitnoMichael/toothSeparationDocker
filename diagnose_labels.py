@@ -62,23 +62,27 @@ DECIDUOUS = set(range(51, 56)) | set(range(61, 66)) | set(range(71, 76)) | set(r
 
 
 def read_obj(path):
-    """Вершины и цвета из .obj. Возвращает (xyz, colors, n_floats_per_vertex)."""
-    xyz, colors, widths = [], [], defaultdict(int)
+    """Вершины и цвета из .obj. Возвращает (xyz, colors, n_floats_per_vertex).
+
+    Разбор векторизован (numpy), а не построчный на Python: файлы .obj в
+    3DTeethSeg'22 крупные (десятки тысяч вершин на скан), и при разборе
+    десятков кейсов построчный вариант занимает минуты.
+    """
+    buf = []
     with open(path, 'r', errors='ignore') as f:
         for line in f:
-            if not line.startswith('v '):
-                continue
-            parts = line.split()
-            vals = parts[1:]
-            widths[len(vals)] += 1
-            try:
-                xyz.append([float(v) for v in vals[:3]])
-                colors.append([float(v) for v in vals[3:6]])
-            except ValueError:
-                continue
-    xyz = np.asarray(xyz, dtype=np.float64)
-    colors = np.asarray(colors, dtype=np.float64) if len(colors) else np.zeros((0, 3))
-    return xyz, colors, widths
+            if line.startswith('v '):
+                buf.append(line[2:])
+    if not buf:
+        return np.zeros((0, 3)), np.zeros((0, 3)), 0
+    vals = np.array(' '.join(buf).split(), dtype=np.float64)
+    width = vals.size // len(buf)
+    if width < 3:
+        return np.zeros((0, 3)), np.zeros((0, 3)), width
+    arr = vals.reshape(len(buf), width)
+    xyz = arr[:, :3]
+    colors = arr[:, 3:6] if width >= 6 else np.zeros((len(arr), 3))
+    return xyz, colors, width
 
 
 def read_labels(path):
@@ -182,6 +186,7 @@ def main():
         print(f"\n=== {split}: всего .obj = {len(find_cases(obj_dir))}, разбираю {len(cases)}")
 
         mismatch, purities, spreads, color_spreads = [], [], [], []
+        width_counter = defaultdict(int)
         split_counts = defaultdict(float)
         n_align_ok = 0
 
@@ -190,7 +195,8 @@ def main():
             if not os.path.exists(json_path):
                 print(f"  ⚠ нет GT: {rel}")
                 continue
-            xyz, colors, widths = read_obj(obj_path)
+            xyz, colors, width = read_obj(obj_path)
+            width_counter[width] += 1
             labels = read_labels(json_path)
             n_v, n_l = len(xyz), len(labels)
             if n_v != n_l:
@@ -225,6 +231,7 @@ def main():
             if cs is not None:
                 color_spreads.append(cs)
 
+        print(f"  число значений на вершину в .obj: {dict(width_counter)}")
         print(f"  count-mismatch (len .obj != len .json): {len(mismatch)}/{len(cases)}")
         for rel, nv, nl in mismatch[:5]:
             print(f"      {rel}: obj={nv} json={nl}")
