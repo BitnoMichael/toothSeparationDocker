@@ -393,6 +393,17 @@ python diagnose_labels.py --root /app/Dataset_900 \
     --out per_class_distribution.csv
 ```
 
+Или одной командой «диагностика → обучение» (обёртка `run_diagnostics_and_train.py`):
+сначала проверка данных (результаты в `/app/checkpoints/diag/`), затем обучение с
+переданными аргументами; ошибка диагностики обучение не прерывает.
+
+```bash
+python run_diagnostics_and_train.py --diag_max_cases 15 -- \
+    Train_Hybrid.py --save_path /app/checkpoints/run2 --resume_from last \
+    --early_stopping_patience 40 --bn_momentum 0.01 --bn_recalibrate 40 \
+    --dump_per_class
+```
+
 ### ⚠️ Про BatchNorm — источник «дыхания» val-метрики
 
 BatchNorm в `train`-режиме считает статистики по текущему батчу, а в `eval`-режиме использует **running-статистики** — экспоненциальное среднее с `momentum`. При `momentum=0.1` окно усреднения ≈ **10 батчей**, а при `batch_size=1` это статистики последних ~10 **случайных** сканов обучающей выборки. Оценка на validation идёт с этими «случайными» статистиками → метрика скачет от эпохи к эпохе, хотя веса меняются плавно.
