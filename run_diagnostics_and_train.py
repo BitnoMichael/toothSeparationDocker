@@ -37,6 +37,20 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
+# Те же аргументы, что и в рабочей команде запуска. Используются, если в
+# argv не нашлось явной команды обучения (например, если CLI обрезал "--"):
+# так прогон всё равно продолжит обучение с теми же настройками, а не
+# молча стартует с нуля на дефолтных путях.
+DEFAULT_TRAIN_ARGS = [
+    'Train_Hybrid.py',
+    '--save_path', '/app/checkpoints/run2',
+    '--resume_from', 'last',
+    '--early_stopping_patience', '40',
+    '--bn_momentum', '0.01',
+    '--bn_recalibrate', '40',
+    '--dump_per_class',
+]
+
 
 def run(cmd, log_path=None):
     """Запуск команды с одновременной записью в stdout и в файл."""
@@ -62,7 +76,15 @@ def main():
         i = argv.index('--')
         diag_argv, train_args = argv[:i], argv[i + 1:]
     else:
+        # Разделитель мог срезаться в CLI. Тогда ищем первый аргумент,
+        # похожий на скрипт, и всё после него считаем командой обучения.
         diag_argv = argv
+        for j, a in enumerate(argv):
+            if a.endswith('.py') and not a.startswith('-'):
+                diag_argv, train_args = argv[:j], argv[j:]
+                print(f"(разделитель '--' не дошёл - разбираю argv сами: "
+                      f"диагностика={diag_argv}, обучение={train_args})")
+                break
 
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument('--diag_root', default='/app/Dataset_900')
@@ -80,12 +102,27 @@ def main():
     if args.train_args:
         train_args = shlex.split(args.train_args)
     if not train_args:
-        train_args = ['Train_Hybrid.py']
+        train_args = list(DEFAULT_TRAIN_ARGS)
+        print("⚠️ Команда обучения не распознана - использую рабочий дефолт:\n   " +
+              " ".join(DEFAULT_TRAIN_ARGS))
     if unknown:
         print(f"⚠️ Неизвестные аргументы диагностики (игнорирую): {unknown}")
 
     os.makedirs(args.diag_out_dir, exist_ok=True)
     t0 = time.time()
+    summary_path = os.path.join(args.diag_out_dir, 'SUMMARY.txt')
+
+    def write_summary(lines):
+        try:
+            with open(summary_path, 'a', encoding='utf-8') as f:
+                f.write('\n'.join(lines) + '\n')
+        except Exception as e:
+            print(f"(не смог записать {summary_path}: {e})")
+
+    write_summary(["=" * 60,
+                   f"Запуск: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                   f"Команда обучения: {' '.join(train_args)}",
+                   "=" * 60])
 
     if not args.skip_diag:
         print("=" * 70)
@@ -102,6 +139,18 @@ def main():
         print(f"[диагностика] rc={rc}, время {time.time() - t0:.0f} с")
         if rc != 0:
             print("⚠️ Диагностика завершилась с ошибкой - продолжаю обучение.")
+        # Копия ключевых строк в сводку (на случай, если лог большой)
+        log_path = os.path.join(args.diag_out_dir, 'diagnose_labels.log')
+        if os.path.exists(log_path):
+            with open(log_path, encoding='utf-8') as f:
+                txt = f.read()
+            keys = [l for l in txt.splitlines()
+                    if ('mismatch' in l or 'purity' in l or
+                        ('точек всего' in l and 'молочн' in l) or
+                        'классов с ненулевым' in l or 'по челюстям' in l or
+                        'значений на вершину' in l or
+                        l.strip().startswith(('upper', 'lower')))]
+            write_summary(["--- ДИАГНОСТИКА РАЗМЕТКИ ---"] + keys)
 
         # Проверка утверждения про веса классов (нужен per_class_metrics.csv)
         print("\n--- проверка утверждения про веса классов ---", flush=True)
